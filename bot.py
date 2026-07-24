@@ -418,17 +418,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         parsed = ai.parse_message(text)
 
+    # Check for a clarification question first -- this also covers the "couldn't
+    # parse it" / "AI call failed" fallbacks, which set is_expense=False but still
+    # carry a specific, more useful message than the generic one below.
+    if parsed.get("needs_clarification") and parsed.get("clarification_question"):
+        context.chat_data[PENDING_KEY] = {"original": text}
+        await update.message.reply_text(parsed["clarification_question"])
+        return
+
     if not parsed.get("is_expense"):
         if pending:
             context.chat_data.pop(PENDING_KEY, None)
         await update.message.reply_text(
             "Not sure what to do with that. Use /log, /claim, /balance, /summary, /recent, or /help."
         )
-        return
-
-    if parsed.get("needs_clarification") and parsed.get("clarification_question"):
-        context.chat_data[PENDING_KEY] = {"original": text}
-        await update.message.reply_text(parsed["clarification_question"])
         return
 
     context.chat_data.pop(PENDING_KEY, None)
@@ -457,6 +460,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Logged: {_money(amount, currency)} -- {description} [{category}]\n\n{_status_text(status)}"
         )
         await _send_alert_if_needed(update, chat_id)
+
+
+# ---------- global error handler ----------
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Safety net: any exception a handler doesn't catch itself lands here.
+    Without this, python-telegram-bot just logs it and the user gets dead
+    silence -- this makes sure they always get *some* reply."""
+    logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Something went wrong on my end processing that -- try again in a moment."
+            )
+        except Exception:
+            logger.exception("Failed to notify user about the error")
 
 
 # ---------- background rollover check ----------
@@ -502,6 +521,7 @@ def main():
     app.add_handler(CommandHandler("delete", delete_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(on_error)
 
     if app.job_queue is not None:
         app.job_queue.run_repeating(rollover_tick, interval=3600, first=10)

@@ -15,9 +15,12 @@ reliably without brittle regex.
 """
 
 import json
+import logging
 import anthropic
 
 import config
+
+logger = logging.getLogger(__name__)
 
 _client = None
 
@@ -65,30 +68,45 @@ purchases should default is_claimable to false without asking.
 
 
 def parse_message(text: str) -> dict:
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=300,
-        system=PARSE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": text}],
-    )
-    raw = resp.content[0].text.strip()
-    return _safe_json(raw)
+    """Never raises -- if the Claude call itself fails (auth, rate limit,
+    network blip, etc.), falls back to a clarification response so the bot
+    always replies to the user instead of going silent."""
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=300,
+            system=PARSE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = resp.content[0].text.strip()
+        return _safe_json(raw)
+    except Exception:
+        logger.exception("parse_message: Claude call failed, falling back to a clarification reply")
+        return _clarify_fallback(
+            "Sorry, I'm having trouble reaching my brain right now -- mind trying again in a "
+            "moment, or use /log 12.50 lunch instead?"
+        )
 
 
 def categorize(description: str) -> str:
-    client = _get_client()
-    resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=20,
-        system=(
-            f"Reply with exactly one word from this list, nothing else: {CATEGORY_LIST}. "
-            "Pick the best fit for the purchase described."
-        ),
-        messages=[{"role": "user", "content": description or "unknown purchase"}],
-    )
-    text = resp.content[0].text.strip()
-    return text if text in config.CATEGORIES else "Other"
+    """Never raises -- defaults to 'Other' if the Claude call fails."""
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=20,
+            system=(
+                f"Reply with exactly one word from this list, nothing else: {CATEGORY_LIST}. "
+                "Pick the best fit for the purchase described."
+            ),
+            messages=[{"role": "user", "content": description or "unknown purchase"}],
+        )
+        text = resp.content[0].text.strip()
+        return text if text in config.CATEGORIES else "Other"
+    except Exception:
+        logger.exception("categorize: Claude call failed, defaulting to 'Other'")
+        return "Other"
 
 
 def answer_with_data(question: str, rows: list) -> str:
@@ -135,6 +153,19 @@ def answer_with_trends(period: str, payload: dict) -> str:
     return resp.content[0].text.strip()
 
 
+def _clarify_fallback(message: str) -> dict:
+    return {
+        "is_expense": False,
+        "amount": None,
+        "currency": None,
+        "description": None,
+        "category": None,
+        "is_claimable": None,
+        "needs_clarification": True,
+        "clarification_question": message,
+    }
+
+
 def _safe_json(raw: str) -> dict:
     # Strip accidental code fences if the model adds them.
     if raw.startswith("```"):
@@ -144,14 +175,6 @@ def _safe_json(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {
-            "is_expense": False,
-            "amount": None,
-            "currency": None,
-            "description": None,
-            "category": None,
-            "is_claimable": None,
-            "needs_clarification": True,
-            "clarification_question": "Sorry, I didn't quite catch that — could you rephrase it, "
-                                       "e.g. 'spent 12 on lunch'?",
-        }
+        return _clarify_fallback(
+            "Sorry, I didn't quite catch that — could you rephrase it, e.g. 'spent 12 on lunch'?"
+        )
