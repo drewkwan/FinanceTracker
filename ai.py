@@ -48,12 +48,19 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "category": one of the category list, or null if unclear,
   "is_claimable": true/false/null (null if the message doesn't say and it's not obvious),
   "needs_clarification": true/false,
-  "clarification_question": string or null (a short, friendly question to ask the user, only if needs_clarification is true)
+  "clarification_question": string or null (a short, friendly question to ask the user, only if needs_clarification is true),
+  "casual_reply": string or null (only set this when is_expense is false AND needs_clarification is false --
+    a short, natural, in-character reply to send back instead of logging anything)
 }}
 
 Rules:
-- If the message clearly isn't about logging an expense (e.g. "hi", "/help"), set is_expense to false.
-- If there's no amount mentioned, set needs_clarification true and ask for the amount.
+- If the message clearly isn't about logging an expense (e.g. "hi", "how's it going", "thanks", a random \
+question, "/help"), set is_expense to false and needs_clarification to false, and write a short, warm, \
+conversational "casual_reply" as if you're the person's friendly personal finance assistant chatting with \
+them -- not a form. Feel free to be a little personable, but keep it brief (1-2 sentences, no markdown), and \
+if it's natural, you can gently remind them what you're for (e.g. "also happy to log an expense whenever").
+- If there's no amount mentioned in what's clearly an attempt to log an expense, set needs_clarification true \
+and ask for the amount (leave casual_reply null in this case).
 - Only set "currency" when the message explicitly names or symbolizes a different currency (e.g. "20 USD", \
 "€15", "50 baht" -> THB). Don't ask a clarifying question about currency -- just default to null (base \
 currency) if it's not clearly stated.
@@ -163,6 +170,7 @@ def _clarify_fallback(message: str) -> dict:
         "is_claimable": None,
         "needs_clarification": True,
         "clarification_question": message,
+        "casual_reply": None,
     }
 
 

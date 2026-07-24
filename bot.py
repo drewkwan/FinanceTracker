@@ -429,9 +429,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parsed.get("is_expense"):
         if pending:
             context.chat_data.pop(PENDING_KEY, None)
-        await update.message.reply_text(
+        # Casual, non-expense chat (e.g. "hi", "thanks") gets a natural reply from
+        # the model itself rather than a canned line. Only fall back to the generic
+        # message if the model didn't give us one (e.g. the AI-call-failed fallback).
+        reply = parsed.get("casual_reply") or (
             "Not sure what to do with that. Use /log, /claim, /balance, /summary, /recent, or /help."
         )
+        await update.message.reply_text(reply)
         return
 
     context.chat_data.pop(PENDING_KEY, None)
