@@ -40,10 +40,25 @@ purchases and answer free-form questions about your spending.
 | `db.py` | SQLite schema + all balance/rollover/claimable/streak/alert logic |
 | `fx.py` | Currency conversion (Frankfurter/ECB rates, cached, with 1:1 fallback) |
 | `ai.py` | Claude calls: natural-language parsing, categorization, on-demand summaries |
+| `trends.py` | Pure period-boundary math for `/summary`'s trend comparisons (no framework deps, unit tested directly) |
 | `config.py` | Reads all settings from environment variables |
 | `requirements.txt` | Python dependencies |
+| `requirements-dev.txt` | Adds `pytest` for running the test suite |
+| `tests/` | Unit tests (`pytest`) covering rollover/streak/currency math, trend boundaries, and AI-call resilience |
 | `Procfile` | Tells Railway how to run the bot as a background worker |
 | `.env.example` | Template for the environment variables you need to set |
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+Tests use a throwaway SQLite file per test and mock both the Frankfurter FX
+API and the Anthropic client, so the whole suite runs offline in under a
+second with no API costs. `.github/workflows/tests.yml` runs it automatically
+on every push.
 
 ## 1. Create your Telegram bot
 

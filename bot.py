@@ -42,6 +42,7 @@ import config
 import db
 import fx
 import ai
+import trends
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -322,22 +323,16 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_allowed(update):
         return
     chat_id = update.effective_chat.id
-    period = (context.args[0].lower() if context.args else "week")
-    today = date.today()
-    tomorrow = today + timedelta(days=1)
-
-    if period == "today":
-        length = 1
-    elif period == "month":
-        period, length = "month", 30
-    else:
-        period, length = "week", 7
-    # current period is exactly `length` days ending today; previous period is
-    # the `length` days immediately before that -- equal-length, non-overlapping.
-    current_start = today - timedelta(days=length - 1)
-    current_end = tomorrow
-    prev_start = current_start - timedelta(days=length)
-    prev_end = current_start
+    period_arg = context.args[0] if context.args else "week"
+    bounds = trends.period_bounds(period_arg, date.today())
+    period = bounds["period"]
+    length = bounds["length"]
+    today = bounds["today"]
+    tomorrow = bounds["tomorrow"]
+    current_start = bounds["current_start"]
+    current_end = bounds["current_end"]
+    prev_start = bounds["prev_start"]
+    prev_end = bounds["prev_end"]
 
     current_totals = db.get_category_totals(chat_id, current_start.isoformat(), current_end.isoformat())
     if not current_totals:
