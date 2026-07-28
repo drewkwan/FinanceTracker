@@ -218,10 +218,11 @@ async def claimed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await _reject_if_not_allowed(update):
-        return
-    chat_id = update.effective_chat.id
+def _balance_text(chat_id: int) -> str:
+    """Shared by the /balance command and the natural-language 'show me my
+    balance' intent, so both paths are guaranteed to say the same thing --
+    a free-text balance query is not a second, separately-maintained
+    implementation."""
     status = db.get_status(chat_id)
     text = _status_text(status)
     pending = db.get_pending_claimables(chat_id)
@@ -229,7 +230,23 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"  #{p['id']} {_money(p['amount'], p['currency'])} -- {p['description']} [{p['category']}]"
                   for p in pending]
         text += "\n\nPending claimables:\n" + "\n".join(lines)
-    await update.message.reply_text(text)
+    return text
+
+
+def _recent_text(chat_id: int, limit: int = 10) -> str:
+    """Shared by /recent and the natural-language 'show me my recent
+    expenses' intent -- see _balance_text's docstring for why."""
+    rows = db.get_recent_expenses(chat_id, limit=limit)
+    if not rows:
+        return "No expenses logged yet."
+    lines = [_expense_line(r) for r in rows]
+    return "Recent expenses:\n" + "\n".join(lines)
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    await update.message.reply_text(_balance_text(update.effective_chat.id))
 
 
 async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,12 +259,7 @@ async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit = max(1, min(50, int(context.args[0])))
         except ValueError:
             pass
-    rows = db.get_recent_expenses(chat_id, limit=limit)
-    if not rows:
-        await update.message.reply_text("No expenses logged yet.")
-        return
-    lines = [_expense_line(r) for r in rows]
-    await update.message.reply_text("Recent expenses:\n" + "\n".join(lines))
+    await update.message.reply_text(_recent_text(chat_id, limit=limit))
 
 
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,6 +409,193 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- natural language handling ----------
 
 PENDING_KEY = "pending_expense"
+LAST_CORRECTION_KEY = "last_correction"
+RECENT_EXPENSES_FOR_AI = 8  # how much history the model gets to resolve "that", "the duplicate", etc.
+
+# A short reply matching one of these, sent as the very next message after a
+# correction, reverts it directly -- deterministic and exact-match only (not
+# a substring check), so an expense description that happens to contain the
+# word "wrong" can't accidentally trigger it.
+CORRECTION_UNDO_PHRASES = {
+    "undo", "undo that", "undo it", "revert", "no", "nope",
+    "wrong", "that's wrong", "thats wrong", "no that's wrong",
+}
+
+CORRECTION_ACTIONS = {
+    "edit_date", "edit_currency", "edit_amount", "edit_description", "edit_category", "delete",
+}
+
+
+def _recent_for_ai(chat_id: int) -> list:
+    rows = db.get_recent_expenses(chat_id, limit=RECENT_EXPENSES_FOR_AI)
+    return [
+        {
+            "id": r["id"], "amount": r["amount"], "currency": r["currency"],
+            "description": r["description"], "category": r["category"],
+            "expense_date": r["expense_date"], "is_claimable": bool(r["is_claimable"]),
+        }
+        for r in rows
+    ]
+
+
+async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True if there was something to revert (and replies about it),
+    False if there was no pending correction snapshot at all."""
+    snap = context.chat_data.pop(LAST_CORRECTION_KEY, None)
+    if not snap:
+        return False
+    chat_id = update.effective_chat.id
+    action = snap["action"]
+
+    if action == "delete":
+        restored = db.restore_deleted_expense(chat_id, snap["row"])
+        await update.message.reply_text(
+            f"Restored: {_money(restored['amount'], restored['currency'])} -- {restored['description']} "
+            f"[{restored['category']}] ({restored['expense_date']})"
+        )
+    elif action == "edit_date":
+        row = db.edit_expense_date(chat_id, snap["expense_id"], snap["old_date"])
+        await update.message.reply_text(f"Reverted -- date is back to {row['expense_date']}.")
+    elif action == "edit_currency":
+        row = db.edit_expense(chat_id, snap["expense_id"], new_currency=snap["old_currency"])
+        await update.message.reply_text(
+            f"Reverted -- currency is back to {_money(row['amount'], row['currency'])}."
+        )
+    elif action == "edit_amount":
+        row = db.edit_expense(chat_id, snap["expense_id"], new_amount=snap["old_amount"])
+        await update.message.reply_text(
+            f"Reverted -- amount is back to {_money(row['amount'], row['currency'])}."
+        )
+    elif action == "edit_description":
+        row = db.edit_expense(chat_id, snap["expense_id"], new_description=snap["old_description"])
+        await update.message.reply_text(f"Reverted -- description is back to \"{row['description']}\".")
+    elif action == "edit_category":
+        row = db.edit_expense(chat_id, snap["expense_id"], new_category=snap["old_category"])
+        await update.message.reply_text(f"Reverted -- category is back to [{row['category']}].")
+    return True
+
+
+async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict, recent_ids: set):
+    """Applies a correction the AI identified against one of the chat's
+    recent expenses. Every confirmation message here is built from real
+    values just read back from the database -- never from AI-generated
+    text -- so the bot can never claim to have made a change it didn't
+    actually make (the exact failure mode that prompted this feature)."""
+    chat_id = update.effective_chat.id
+    target_id = parsed.get("target_expense_id")
+    action = parsed.get("correction_action")
+
+    if target_id not in recent_ids or action not in CORRECTION_ACTIONS:
+        await update.message.reply_text(
+            "I'm not sure which expense you mean -- run /recent to see IDs, then use /edit <id> or /delete <id>."
+        )
+        return
+
+    row = db.get_expense(chat_id, target_id)
+    if row is None:
+        await update.message.reply_text("Couldn't find that expense anymore -- run /recent to check.")
+        return
+
+    if action == "edit_date":
+        days_ago = parsed.get("days_ago")
+        if not isinstance(days_ago, int) or not (0 <= days_ago <= 14):
+            await update.message.reply_text(
+                f"Which day did you mean for {_money(row['amount'], row['currency'])} -- "
+                f"{row['description']}? (e.g. today, yesterday, or '3 days ago')"
+            )
+            return
+        today = date.fromisoformat(db.today_str())
+        new_date = today - timedelta(days=days_ago)
+        old_date = row["expense_date"]
+        updated = db.edit_expense_date(chat_id, target_id, new_date.isoformat())
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "action": "edit_date", "expense_id": target_id, "old_date": old_date,
+        }
+        await update.message.reply_text(
+            f"Updated -- {_money(updated['amount'], updated['currency'])} \"{updated['description']}\" is "
+            f"now dated {updated['expense_date']} (was {old_date}). Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "edit_currency":
+        new_currency = fx.normalize_currency(parsed.get("new_currency"))
+        if not new_currency:
+            await update.message.reply_text(
+                f"What currency should {_money(row['amount'], row['currency'])} -- "
+                f"{row['description']} actually be?"
+            )
+            return
+        old_currency = row["currency"]
+        old_display = _money(row["amount"], old_currency)
+        updated = db.edit_expense(chat_id, target_id, new_currency=new_currency)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "action": "edit_currency", "expense_id": target_id, "old_currency": old_currency,
+        }
+        await update.message.reply_text(
+            f"Updated -- \"{updated['description']}\" is now {_money(updated['amount'], updated['currency'])} "
+            f"(was {old_display}). Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "edit_amount":
+        new_amount = parsed.get("new_amount")
+        if not isinstance(new_amount, (int, float)) or new_amount <= 0:
+            await update.message.reply_text(f"What should the amount for \"{row['description']}\" actually be?")
+            return
+        old_display = _money(row["amount"], row["currency"])
+        updated = db.edit_expense(chat_id, target_id, new_amount=float(new_amount))
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "action": "edit_amount", "expense_id": target_id, "old_amount": row["amount"],
+        }
+        await update.message.reply_text(
+            f"Updated -- \"{updated['description']}\" is now {_money(updated['amount'], updated['currency'])} "
+            f"(was {old_display}). Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "edit_description":
+        new_description = parsed.get("new_description")
+        if not new_description:
+            await update.message.reply_text("What should the description say instead?")
+            return
+        old_description = row["description"]
+        updated = db.edit_expense(chat_id, target_id, new_description=new_description)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "action": "edit_description", "expense_id": target_id, "old_description": old_description,
+        }
+        await update.message.reply_text(
+            f"Updated -- description is now \"{updated['description']}\" (was \"{old_description}\"). "
+            "Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "edit_category":
+        new_category = parsed.get("new_category")
+        if new_category not in config.CATEGORIES:
+            await update.message.reply_text(
+                f"What category should \"{row['description']}\" actually be? "
+                f"({', '.join(config.CATEGORIES)})"
+            )
+            return
+        old_category = row["category"]
+        updated = db.edit_expense(chat_id, target_id, new_category=new_category)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "action": "edit_category", "expense_id": target_id, "old_category": old_category,
+        }
+        await update.message.reply_text(
+            f"Updated -- \"{updated['description']}\" is now [{updated['category']}] (was [{old_category}]). "
+            "Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "delete":
+        deleted = db.delete_expense(chat_id, target_id)
+        context.chat_data[LAST_CORRECTION_KEY] = {"action": "delete", "row": deleted}
+        await update.message.reply_text(
+            f"Deleted: {_money(deleted['amount'], deleted['currency'])} -- {deleted['description']} "
+            f"[{deleted['category']}] ({deleted['expense_date']}). Reply 'undo' if that's wrong."
+        )
+        return
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -404,29 +603,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
-
     pending = context.chat_data.get(PENDING_KEY)
+
+    # Only treat a bare "no"/"wrong"/"undo" as reverting a correction when
+    # we're not mid-clarification -- otherwise it's very likely a genuine
+    # answer to whatever question was just asked (e.g. "is this claimable?").
+    if not pending and text.lower().rstrip(".!") in CORRECTION_UNDO_PHRASES:
+        if await _revert_last_correction(update, context):
+            return
+        # nothing to revert -- fall through and let it be parsed normally
+
+    # A correction snapshot only survives for the single reply immediately
+    # following it; anything else means it's no longer relevant.
+    context.chat_data.pop(LAST_CORRECTION_KEY, None)
+
+    recent_expenses = _recent_for_ai(chat_id)
+    recent_ids = {r["id"] for r in recent_expenses}
+
     if pending:
         # We asked a clarifying question; treat this message as the answer.
         merged_text = f"{pending['original']}\n(Additional info: {text})"
-        parsed = ai.parse_message(merged_text)
+        parsed = ai.parse_message(merged_text, recent_expenses)
     else:
-        parsed = ai.parse_message(text)
+        merged_text = text
+        parsed = ai.parse_message(text, recent_expenses)
 
-    # Check for a clarification question first -- this also covers the "couldn't
-    # parse it" / "AI call failed" fallbacks, which set is_expense=False but still
-    # carry a specific, more useful message than the generic one below.
-    if parsed.get("needs_clarification") and parsed.get("clarification_question"):
-        context.chat_data[PENDING_KEY] = {"original": text}
-        await update.message.reply_text(parsed["clarification_question"])
+    intent = parsed.get("intent")
+
+    if intent == "clarification":
+        # Carry forward the ACCUMULATED text, not just this latest fragment --
+        # otherwise a second (or third) round of clarification silently drops
+        # everything learned in earlier rounds (e.g. an amount mentioned two
+        # messages ago), which was a real bug: the context would shrink with
+        # every back-and-forth instead of growing.
+        context.chat_data[PENDING_KEY] = {"original": merged_text}
+        await update.message.reply_text(parsed.get("clarification_question") or "Could you clarify that?")
         return
 
-    if not parsed.get("is_expense"):
+    if intent == "correction":
+        context.chat_data.pop(PENDING_KEY, None)
+        await _handle_correction(update, context, parsed, recent_ids)
+        return
+
+    if intent == "show_balance":
+        # Answered directly with real numbers -- the exact same code path as
+        # /balance -- rather than just telling the user to go type /balance.
+        context.chat_data.pop(PENDING_KEY, None)
+        await update.message.reply_text(_balance_text(chat_id))
+        return
+
+    if intent == "show_recent":
+        context.chat_data.pop(PENDING_KEY, None)
+        await update.message.reply_text(_recent_text(chat_id))
+        return
+
+    if intent != "log_expense":
+        # "casual", or anything the model didn't tag cleanly -- never silent.
         if pending:
             context.chat_data.pop(PENDING_KEY, None)
-        # Casual, non-expense chat (e.g. "hi", "thanks") gets a natural reply from
-        # the model itself rather than a canned line. Only fall back to the generic
-        # message if the model didn't give us one (e.g. the AI-call-failed fallback).
         reply = parsed.get("casual_reply") or (
             "Not sure what to do with that. Use /log, /claim, /balance, /summary, /recent, or /help."
         )

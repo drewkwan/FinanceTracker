@@ -295,6 +295,27 @@ def delete_most_recent(chat_id):
     return delete_expense(chat_id, recent[0]["id"])
 
 
+def restore_deleted_expense(chat_id, row):
+    """Re-inserts a previously deleted expense row exactly as it was (same
+    amount/currency/amount_base/description/category/claimable-ness/date),
+    applying the exact opposite balance adjustment delete_expense would have
+    made. Used to support one-step 'undo' after a natural-language
+    correction deletes the wrong entry -- gets a fresh row id, since SQLite
+    won't recycle the old one, but every other field is preserved."""
+    ensure_rollover(chat_id)
+    with get_conn() as conn:
+        if not row["is_claimable"] and row["expense_date"] < today_str():
+            _adjust_balance_for_past_day(conn, chat_id, -row["amount_base"])
+        conn.execute(
+            "INSERT INTO expenses (chat_id, amount, currency, amount_base, description, category, "
+            "is_claimable, is_claimed, expense_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, row["amount"], row["currency"], row["amount_base"], row["description"],
+             row["category"], row["is_claimable"], row.get("is_claimed", 0), row["expense_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_expense(chat_id, new_id)
+
+
 def edit_expense(chat_id, expense_id, new_amount=None, new_currency=None,
                   new_description=None, new_category=None):
     """Updates an expense in place. Only touches fields that are passed in.
@@ -324,6 +345,66 @@ def edit_expense(chat_id, expense_id, new_amount=None, new_currency=None,
             "WHERE id = ? AND chat_id = ?",
             (final_amount, final_currency, new_amount_base, final_description, final_category,
              expense_id, chat_id),
+        )
+    return get_expense(chat_id, expense_id)
+
+
+def edit_expense_date(chat_id, expense_id, new_date_str):
+    """Moves a non-claimable expense to a different expense_date, adjusting
+    the running balance so history stays consistent. new_date_str is an ISO
+    date string; dates after today are clamped to today (this app doesn't
+    support logging into the future).
+
+    The balance math depends on whether each side of the move is "today"
+    (live -- spent_today is computed fresh on every read, nothing stored) or
+    an already-rolled-over past day (baked into the single cumulative
+    `balance` number at rollover time):
+
+      - past day -> past day: the amount is removed from one already-rolled
+        day's spend and added to another already-rolled day's spend. Since
+        both use the same (current) daily_target approximation and both feed
+        the same cumulative `balance`, the two adjustments cancel out
+        exactly -- net zero change to balance.
+      - today (live) -> past day: the amount leaves today's live spend
+        (automatic once expense_date changes) and now retroactively counts
+        against a day whose rollover already happened, so that day's
+        leftover -- and therefore balance -- decreases by amount_base.
+      - past day -> today (live): the reverse -- the amount is removed from
+        an already-rolled day (balance increases by amount_base) and now
+        counts against today's live, not-yet-rolled spend instead.
+      - same date (no-op): nothing to do.
+
+    Claimable expenses never touch balance, so their date can move freely
+    with no adjustment. Returns the updated row, or None if the expense
+    doesn't exist / isn't this chat's.
+    """
+    ensure_rollover(chat_id)
+    row = get_expense(chat_id, expense_id)
+    if row is None:
+        return None
+
+    today = today_str()
+    if new_date_str > today:
+        new_date_str = today
+    old_date_str = row["expense_date"]
+
+    if new_date_str == old_date_str:
+        return row
+
+    with get_conn() as conn:
+        if not row["is_claimable"]:
+            old_is_past = old_date_str < today
+            new_is_past = new_date_str < today
+            if old_is_past and not new_is_past:
+                # leaving an already-rolled day -> that day's leftover goes up
+                _adjust_balance_for_past_day(conn, chat_id, row["amount_base"])
+            elif not old_is_past and new_is_past:
+                # entering an already-rolled day -> that day's leftover goes down
+                _adjust_balance_for_past_day(conn, chat_id, -row["amount_base"])
+            # past -> past nets to zero (see docstring); no adjustment needed
+        conn.execute(
+            "UPDATE expenses SET expense_date = ? WHERE id = ? AND chat_id = ?",
+            (new_date_str, expense_id, chat_id),
         )
     return get_expense(chat_id, expense_id)
 

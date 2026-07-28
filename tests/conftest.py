@@ -1,15 +1,19 @@
 """
 Shared pytest fixtures.
 
-Each test gets its own throwaway SQLite file and a UTC "today" (rather than
-BOT_TIMEZONE's Asia/Singapore default), so results are deterministic no
-matter what time or timezone the test runner is in. fx.get_rate is monkeypatched
-by default so tests never hit the real network -- individual tests override it
-when they specifically want to exercise currency conversion.
+Each test gets its own throwaway SQLite file. Test bodies build dates with
+plain date.today() (whatever timezone the test runner's OS is in), so
+db._now_local_date is monkeypatched to match that exactly -- otherwise db.py's
+real BOT_TIMEZONE-aware clock (Asia/Singapore by default) would disagree with
+date.today() by a day for part of every day, on any machine not set to that
+same timezone. fx.get_rate is monkeypatched by default so tests never hit the
+real network -- individual tests override it when they specifically want to
+exercise currency conversion.
 """
 
 import sys
 import os
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,7 +27,7 @@ import fx
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "test.db"))
-    monkeypatch.setattr(config, "BOT_TIMEZONE", "UTC")
+    monkeypatch.setattr(db, "_now_local_date", lambda: date.today())
     db.init_db()
     yield
 

@@ -239,3 +239,134 @@ def test_clear_claimables_marks_all_as_claimed():
     assert count == 2
     assert total == 150
     assert db.get_pending_claimables(CHAT) == []
+
+
+# ---------- edit_expense_date: the "wrong day" correction ----------
+# This is a real user-reported scenario: logging something around midnight
+# and getting the day wrong ("that was for yesterday, not today"). Balance
+# math differs depending on whether each side of the move is "today" (live,
+# nothing stored yet) or an already-rolled-over past day (baked into the
+# single cumulative `balance` number) -- see edit_expense_date's docstring.
+
+def test_edit_date_today_to_past_decreases_balance():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    expense_id = db.add_expense(CHAT, 30, "SGD", "cashcard top-up", "Transport")
+    yesterday = date.today() - timedelta(days=1)
+    row = db.edit_expense_date(CHAT, expense_id, yesterday.isoformat())
+    assert row["expense_date"] == yesterday.isoformat()
+    # moving 30 out of "today" (live) into an already-rolled past day means
+    # that day's leftover -- and therefore balance -- drops by 30
+    assert db.get_or_create_user(CHAT)["balance"] == -30.0
+    # today's live spend no longer includes it
+    assert db.get_status(CHAT)["spent_today"] == 0.0
+
+
+def test_edit_date_past_to_today_increases_balance():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    yesterday = date.today() - timedelta(days=1)
+    _insert_on(CHAT, yesterday, 30)
+    expense = db.get_recent_expenses(CHAT, limit=1)[0]
+    db.edit_expense_date(CHAT, expense["id"], date.today().isoformat())
+    # removing 30 from an already-rolled day frees up 30 of leftover -> balance up
+    assert db.get_or_create_user(CHAT)["balance"] == 30.0
+    # and it now counts against today's live spend instead
+    assert db.get_status(CHAT)["spent_today"] == 30.0
+
+
+def test_edit_date_past_to_past_nets_zero_balance_change():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    three_days_ago = date.today() - timedelta(days=3)
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET last_rollover_date = ? WHERE chat_id = ?",
+            (three_days_ago.isoformat(), CHAT),
+        )
+    _insert_on(CHAT, three_days_ago, 20)
+    two_days_ago = three_days_ago + timedelta(days=1)
+    _insert_on(CHAT, two_days_ago, 30)
+    db.ensure_rollover(CHAT)  # rolls 3 days: balance = (100-20)+(100-30)+(100-0) = 250
+    assert db.get_or_create_user(CHAT)["balance"] == 250.0
+
+    # move the 30 from two_days_ago to three_days_ago -- both already rolled,
+    # so the total balance shouldn't change at all
+    moved = next(e for e in db.get_recent_expenses(CHAT, limit=10) if e["amount"] == 30)
+    db.edit_expense_date(CHAT, moved["id"], three_days_ago.isoformat())
+    assert db.get_or_create_user(CHAT)["balance"] == 250.0
+    assert db.get_expense(CHAT, moved["id"])["expense_date"] == three_days_ago.isoformat()
+
+
+def test_edit_date_same_date_is_noop():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    expense_id = db.add_expense(CHAT, 10, "SGD", "coffee", "Food")
+    db.edit_expense_date(CHAT, expense_id, date.today().isoformat())
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+
+
+def test_edit_date_claimable_never_touches_balance():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    expense_id = db.add_expense(CHAT, 200, "SGD", "flight", "Travel", is_claimable=True)
+    yesterday = date.today() - timedelta(days=1)
+    row = db.edit_expense_date(CHAT, expense_id, yesterday.isoformat())
+    assert row["expense_date"] == yesterday.isoformat()
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0  # claimables never touch balance
+    assert db.get_status(CHAT)["pending_claimable"] == 200
+
+
+def test_edit_date_future_is_clamped_to_today():
+    db.get_or_create_user(CHAT)
+    expense_id = db.add_expense(CHAT, 10, "SGD", "coffee", "Food")
+    tomorrow = date.today() + timedelta(days=1)
+    row = db.edit_expense_date(CHAT, expense_id, tomorrow.isoformat())
+    assert row["expense_date"] == date.today().isoformat()  # clamped, not tomorrow
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0  # same-day no-op after clamping
+
+
+def test_edit_date_returns_none_for_unknown_expense():
+    db.get_or_create_user(CHAT)
+    assert db.edit_expense_date(CHAT, 99999, date.today().isoformat()) is None
+
+
+# ---------- restore_deleted_expense: one-step "undo the deletion" ----------
+
+def test_restore_deleted_expense_reverses_past_day_delete():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    yesterday = date.today() - timedelta(days=1)
+    _insert_on(CHAT, yesterday, 30)
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET last_rollover_date = ? WHERE chat_id = ?",
+            (yesterday.isoformat(), CHAT),
+        )
+    db.ensure_rollover(CHAT)  # balance = 70
+    deleted = db.delete_expense(CHAT, db.get_recent_expenses(CHAT, limit=1)[0]["id"])
+    assert db.get_or_create_user(CHAT)["balance"] == 100.0  # 70 + 30 refunded
+    restored = db.restore_deleted_expense(CHAT, deleted)
+    assert restored["amount"] == 30
+    assert restored["expense_date"] == yesterday.isoformat()
+    assert db.get_or_create_user(CHAT)["balance"] == 70.0  # back to pre-delete balance
+
+
+def test_restore_deleted_expense_reverses_today_delete_with_no_balance_change():
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    expense_id = db.add_expense(CHAT, 20, "SGD", "coffee", "Food")
+    deleted = db.delete_expense(CHAT, expense_id)
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+    db.restore_deleted_expense(CHAT, deleted)
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0  # today's spend is live either way
+    assert db.get_status(CHAT)["spent_today"] == 20.0
+
+
+def test_restore_deleted_expense_preserves_claimable_flag():
+    db.get_or_create_user(CHAT)
+    expense_id = db.add_expense(CHAT, 300, "SGD", "team dinner", "Food", is_claimable=True)
+    deleted = db.delete_expense(CHAT, expense_id)
+    restored = db.restore_deleted_expense(CHAT, deleted)
+    assert restored["is_claimable"] == 1
+    assert db.get_status(CHAT)["pending_claimable"] == 300

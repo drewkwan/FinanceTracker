@@ -1,17 +1,24 @@
 """
 Claude-powered parsing and categorization.
 
-Two entry points:
-  - parse_message(text): turns a free-text chat message like
-    "spent 12.50 on lunch, claimable" into a structured expense, asking a
-    clarifying question if something important is missing or ambiguous.
+Entry points:
+  - parse_message(text, recent_expenses): classifies a free-text chat message
+    into exactly one intent -- log_expense, correction (edit/delete something
+    already logged), casual chat, or a clarifying question -- and extracts
+    the structured fields needed to act on it. Never invents a target
+    expense id outside the recent_expenses list it's given, and never claims
+    an action was taken; that's entirely bot.py's job, using real DB values.
   - categorize(description): given a known amount/description (e.g. from
     /log or /claim), returns just the category tag.
   - answer_with_data(question, context_rows): used for on-demand analytics,
     turns raw category totals into a short natural-language answer.
+  - answer_with_trends(period, payload): the /summary trend narrative.
 
 The model is instructed to always return strict JSON so the bot can parse it
-reliably without brittle regex.
+reliably without brittle regex. All date arithmetic and all "did this
+actually happen" confirmations are handled deterministically in Python --
+the model's job is classification and extraction only, never computing
+dates or reporting on state changes itself.
 """
 
 import json
@@ -35,56 +42,130 @@ def _get_client():
 CATEGORY_LIST = ", ".join(config.CATEGORIES)
 CURRENCY_LIST = ", ".join(config.KNOWN_CURRENCIES)
 
-PARSE_SYSTEM_PROMPT = f"""You extract structured expense data from a short chat message someone sends \
-to their personal expense-tracking bot. Categories you may use: {CATEGORY_LIST}. \
-The user's default/base currency is {config.BASE_CURRENCY}. Currencies you may recognize: {CURRENCY_LIST}.
+# The bot's real command surface, embedded in the prompt so casual replies
+# never deny something that actually exists (e.g. claiming it "can't show
+# balances" when /balance does exactly that) -- this was a real observed bug.
+COMMAND_LIST = (
+    "/log <amount> [currency] <description> (log a personal expense), "
+    "/claim <amount> [currency] <description> (log a claimable/reimbursable expense), "
+    "/claimed (clear pending claimables), "
+    "/balance (today's live target, balance, spend, streak -- ONLY today, no historical snapshots of past days), "
+    "/summary [today|week|month] (spending breakdown + trends over a period), "
+    "/recent [n] (last n logged expenses with their IDs), /undo (remove the most recent expense), "
+    "/edit <id> <amount> [description] (fix a mislogged expense), /delete <id> (remove by ID)"
+)
+
+PARSE_SYSTEM_PROMPT = f"""You read a short chat message sent to a personal expense-tracking Telegram bot \
+and classify it into exactly ONE intent, extracting the fields needed to act on it. Categories you may use: \
+{CATEGORY_LIST}. The user's default/base currency is {config.BASE_CURRENCY}. Currencies you may recognize: \
+{CURRENCY_LIST}. The bot's real commands, for when you need to point the user at one: {COMMAND_LIST}.
+
+You will also be given a JSON list of the user's most recently logged expenses (most recent first), each \
+with an "id". This is the ONLY set of expenses you may reference -- never invent or guess an id that isn't \
+in that list.
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "is_expense": true/false,
-  "amount": number or null,
-  "currency": one of the currency list, or null if not mentioned (assume base currency when null),
-  "description": string or null,
-  "category": one of the category list, or null if unclear,
-  "is_claimable": true/false/null (null if the message doesn't say and it's not obvious),
-  "needs_clarification": true/false,
-  "clarification_question": string or null (a short, friendly question to ask the user, only if needs_clarification is true),
-  "casual_reply": string or null (only set this when is_expense is false AND needs_clarification is false --
-    a short, natural, in-character reply to send back instead of logging anything)
+  "intent": "log_expense" | "correction" | "show_balance" | "show_recent" | "casual" | "clarification",
+
+  "amount": number or null (log_expense only),
+  "currency": one of the currency list, or null if not mentioned (log_expense only),
+  "description": string or null (log_expense only),
+  "category": one of the category list, or null if unclear (log_expense only),
+  "is_claimable": true/false/null (log_expense only),
+
+  "target_expense_id": integer or null (correction only -- MUST be an "id" from the provided recent-expenses list),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" or null (correction only),
+  "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
+    up to 14. Extract WHICH day the user means as a plain count of days back; never compute or output an
+    actual calendar date yourself, that's done in code),
+  "new_currency": one of the currency list or null (correction + edit_currency only),
+  "new_amount": number or null (correction + edit_amount only),
+  "new_description": string or null (correction + edit_description only),
+  "new_category": one of the category list or null (correction + edit_category only),
+
+  "clarification_question": string or null (clarification only -- short and friendly),
+  "casual_reply": string or null (casual only -- short, warm, in-character reply)
 }}
 
-Rules:
-- If the message clearly isn't about logging an expense (e.g. "hi", "how's it going", "thanks", a random \
-question, "/help"), set is_expense to false and needs_clarification to false, and write a short, warm, \
-conversational "casual_reply" as if you're the person's friendly personal finance assistant chatting with \
-them -- not a form. Feel free to be a little personable, but keep it brief (1-2 sentences, no markdown), and \
-if it's natural, you can gently remind them what you're for (e.g. "also happy to log an expense whenever").
-- If there's no amount mentioned in what's clearly an attempt to log an expense, set needs_clarification true \
-and ask for the amount (leave casual_reply null in this case).
-- Only set "currency" when the message explicitly names or symbolizes a different currency (e.g. "20 USD", \
-"€15", "50 baht" -> THB). Don't ask a clarifying question about currency -- just default to null (base \
-currency) if it's not clearly stated.
-- Only ask about category if it's genuinely ambiguous (e.g. "spent 50 at Target" could be groceries, \
-shopping, or household - ask). Obvious cases (e.g. "uber", "coffee", "netflix") should NOT need clarification.
-- Only ask about is_claimable if the message gives no hint either way AND the amount is large enough that \
-it plausibly could be a reimbursable/business expense (e.g. over 50 in base currency). Small everyday \
-purchases should default is_claimable to false without asking.
-- Keep clarification_question short and conversational, and only ask about ONE thing at a time \
-(prioritize: amount > claimable > category).
+Deciding the intent:
+- "log_expense": the message is reporting a NEW purchase to track (e.g. "spent 12 on lunch", "20 USD taxi").
+- "correction": the message is about something ALREADY logged -- fixing the currency/amount/description/
+  category/date of a past entry, or asking to delete a duplicate/mistake (e.g. "that was SGD not USD", "that
+  was for yesterday", "that was 2 days ago", "you double logged my lunch", "delete that", "actually it was $50
+  not $15", "that log from yesterday was wrong, tag it to the day before instead"). Identify the ONE matching
+  expense in the provided recent-expenses list -- match on whatever the message gives you: amount,
+  description, OR just a date/day reference alone (e.g. "yesterday's log", "the one from Monday") is enough
+  on its own if exactly one recent expense has that expense_date, even with no amount or description
+  mentioned. Set target_expense_id to its "id". If nothing in the list clearly matches, or more than one
+  plausibly does (e.g. two expenses were both logged yesterday and the message doesn't say which), do NOT
+  guess -- use "clarification" instead and ask the user to specify (you can suggest /recent to see IDs). If a
+  single message describes MORE THAN ONE correction (e.g. "the $100 was from two days ago, also you double
+  logged my lunch"), do NOT fall back to "casual" just because it's compound -- pick whichever one is
+  clearest/most specific and resolve that one as a normal "correction"; the user will follow up separately
+  about the other one if your reply doesn't cover it.
+- "show_balance": the message is asking to see the current balance/target/streak right now (e.g. "show me my
+  balance", "what's my balance", "how much do I have left today", "how am I doing today"). This is answered
+  directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,
+  because that command does exactly this and there's no reason to make the user type it separately. Only use
+  this for TODAY's live balance; a request for a specific past day's balance (which isn't tracked historically)
+  should be "casual", explaining that limitation.
+- "show_recent": the message is asking to see recently logged expenses (e.g. "show me today's log", "what
+  have I logged recently", "show me my expenses"). Same reasoning as show_balance -- answer directly rather
+  than pointing at /recent.
+- "casual": the message isn't about logging, correcting, or checking balance/recent expenses (e.g. "hi",
+  "thanks", small talk, or a question about what you can do more generally). Write a short, warm
+  "casual_reply" as the person's friendly finance assistant -- 1-2 sentences, no markdown. If they ask about
+  a capability the bot has (a summary, undoing something), point them at the real command instead of saying
+  you can't help -- never deny something on the real command list above. If they ask for something the bot
+  genuinely can't do (e.g. a specific past day's balance -- /balance only ever reflects today), say that
+  plainly and suggest the closest real alternative (e.g. /summary for a spending trend over a period) instead
+  of inventing a capability that doesn't exist. NEVER, in a casual_reply, claim OR PROMISE that you performed,
+  edited, deleted, logged, or will look into/fix/note anything -- not "I've removed it", not "I'll take care
+  of that", not "noted, I'll fix it" -- casual_reply only talks and has no way to follow up later, so any
+  phrasing implying action past, present, or future is misleading. Any actual data change must go through
+  "log_expense" or "correction" instead, in the same turn -- never deferred to "casual" with a promise.
+- "clarification": something important is missing or ambiguous to safely act on -- a log_expense with no
+  amount, or a correction with an unclear target. Ask ONE short, specific question.
+
+Rules for log_expense fields:
+- A bare currency SYMBOL with no letters (e.g. "$", "£") is ambiguous on its own -- default it to the base
+  currency ({config.BASE_CURRENCY}) rather than assuming USD, unless the message also spells out an actual
+  currency name/code (e.g. "USD", "US dollars", "20 dollars US"). Only set "currency" at all when a currency
+  is explicitly named or unambiguously symbolized (e.g. "20 USD", "€15", "50 baht" -> THB); otherwise leave it
+  null so it defaults to base currency. Don't ask a clarifying question about currency.
+- If there's no amount mentioned in what's clearly an attempt to log an expense, use "clarification" and ask
+  for the amount.
+- Only ask about category if it's genuinely ambiguous (e.g. "spent 50 at Target" could be groceries,
+  shopping, or household). Obvious cases (e.g. "uber", "coffee", "netflix") should NOT need clarification.
+- Only ask about is_claimable if the message gives no hint either way AND the amount is large enough that it
+  plausibly could be a reimbursable/business expense (e.g. over 50 in base currency). Small everyday
+  purchases default is_claimable to false without asking.
+- Keep clarification_question short and conversational, and only ask about ONE thing at a time (prioritize:
+  amount > claimable > category > correction target).
 """
 
 
-def parse_message(text: str) -> dict:
-    """Never raises -- if the Claude call itself fails (auth, rate limit,
-    network blip, etc.), falls back to a clarification response so the bot
-    always replies to the user instead of going silent."""
+def parse_message(text: str, recent_expenses: list | None = None) -> dict:
+    """recent_expenses: list of {id, amount, currency, description, category,
+    expense_date, is_claimable} dicts, most recent first -- typically the
+    last ~8 for this chat. Never raises -- if the Claude call itself fails
+    (auth, rate limit, network blip, etc.), falls back to a clarification
+    response so the bot always replies to the user instead of going silent.
+    """
+    recent_expenses = recent_expenses or []
+    user_content = (
+        f"Recent expenses (most recent first, only reference an id from here):\n"
+        f"{json.dumps(recent_expenses)}\n\n"
+        f"Message: {text}"
+    )
     try:
         client = _get_client()
         resp = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=300,
+            max_tokens=350,
             system=PARSE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": text}],
+            messages=[{"role": "user", "content": user_content}],
         )
         raw = resp.content[0].text.strip()
         return _safe_json(raw)
@@ -162,13 +243,19 @@ def answer_with_trends(period: str, payload: dict) -> str:
 
 def _clarify_fallback(message: str) -> dict:
     return {
-        "is_expense": False,
+        "intent": "clarification",
         "amount": None,
         "currency": None,
         "description": None,
         "category": None,
         "is_claimable": None,
-        "needs_clarification": True,
+        "target_expense_id": None,
+        "correction_action": None,
+        "days_ago": None,
+        "new_currency": None,
+        "new_amount": None,
+        "new_description": None,
+        "new_category": None,
         "clarification_question": message,
         "casual_reply": None,
     }

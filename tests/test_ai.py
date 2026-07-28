@@ -53,37 +53,91 @@ def _mock_client(monkeypatch, create_return):
     return fake
 
 
-# ---------- parse_message: happy path ----------
+# ---------- parse_message: happy path, log_expense ----------
 
-def test_parse_message_returns_parsed_json(monkeypatch):
+def test_parse_message_returns_parsed_log_expense(monkeypatch):
     payload = {
-        "is_expense": True, "amount": 12.5, "currency": None, "description": "lunch",
-        "category": "Food", "is_claimable": False, "needs_clarification": False,
+        "intent": "log_expense", "amount": 12.5, "currency": None, "description": "lunch",
+        "category": "Food", "is_claimable": False,
+        "target_expense_id": None, "correction_action": None, "days_ago": None,
+        "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
         "clarification_question": None, "casual_reply": None,
     }
     _mock_client(monkeypatch, json.dumps(payload))
-    result = ai.parse_message("spent 12.50 on lunch")
-    assert result["is_expense"] is True
+    result = ai.parse_message("spent 12.50 on lunch", [])
+    assert result["intent"] == "log_expense"
     assert result["amount"] == 12.5
 
 
 def test_parse_message_strips_markdown_code_fence(monkeypatch):
-    payload = {"is_expense": True, "amount": 5, "currency": None, "description": "coffee",
-               "category": "Food", "is_claimable": False, "needs_clarification": False,
+    payload = {"intent": "log_expense", "amount": 5, "currency": None, "description": "coffee",
+               "category": "Food", "is_claimable": False,
+               "target_expense_id": None, "correction_action": None, "days_ago": None,
+               "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
                "clarification_question": None, "casual_reply": None}
     _mock_client(monkeypatch, f"```json\n{json.dumps(payload)}\n```")
-    result = ai.parse_message("coffee 5")
+    result = ai.parse_message("coffee 5", [])
     assert result["amount"] == 5
 
 
+def test_parse_message_passes_recent_expenses_into_the_prompt(monkeypatch):
+    """Regression guard for the actual reported bug: without seeing recent
+    expenses, the model has no way to know which entry a correction like
+    "that was for yesterday" refers to. Just checks the context is actually
+    sent to the API, not what the model does with it (that's not testable
+    without a real call)."""
+    captured = {}
+
+    class _CapturingClient(_FakeClient):
+        def create(self, **kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return super().create(**kwargs)
+
+    fake = _CapturingClient(json.dumps({
+        "intent": "casual", "amount": None, "currency": None, "description": None, "category": None,
+        "is_claimable": None, "target_expense_id": None, "correction_action": None, "days_ago": None,
+        "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+        "clarification_question": None, "casual_reply": "hey!",
+    }))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    recent = [{"id": 42, "amount": 100, "currency": "SGD", "description": "parking cashcard top-up",
+               "category": "Transport", "expense_date": "2026-07-27", "is_claimable": False}]
+    ai.parse_message("hi", recent)
+    sent_content = captured["messages"][0]["content"]
+    assert "42" in sent_content
+    assert "parking cashcard top-up" in sent_content
+
+
+# ---------- parse_message: casual intent ----------
+
 def test_parse_message_returns_casual_reply_for_non_expense(monkeypatch):
-    payload = {"is_expense": False, "amount": None, "currency": None, "description": None,
-               "category": None, "is_claimable": None, "needs_clarification": False,
+    payload = {"intent": "casual", "amount": None, "currency": None, "description": None,
+               "category": None, "is_claimable": None,
+               "target_expense_id": None, "correction_action": None, "days_ago": None,
+               "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
                "clarification_question": None, "casual_reply": "Hey! Doing well -- anything to log?"}
     _mock_client(monkeypatch, json.dumps(payload))
-    result = ai.parse_message("hey how's it going")
-    assert result["is_expense"] is False
+    result = ai.parse_message("hey how's it going", [])
+    assert result["intent"] == "casual"
     assert result["casual_reply"] == "Hey! Doing well -- anything to log?"
+
+
+# ---------- parse_message: correction intent ----------
+
+def test_parse_message_returns_correction_targeting_a_recent_id(monkeypatch):
+    payload = {"intent": "correction", "amount": None, "currency": None, "description": None,
+               "category": None, "is_claimable": None,
+               "target_expense_id": 42, "correction_action": "edit_date", "days_ago": 2,
+               "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+               "clarification_question": None, "casual_reply": None}
+    _mock_client(monkeypatch, json.dumps(payload))
+    recent = [{"id": 42, "amount": 100, "currency": "SGD", "description": "parking cashcard top-up",
+               "category": "Transport", "expense_date": "2026-07-27", "is_claimable": False}]
+    result = ai.parse_message("sorry that was from two days ago", recent)
+    assert result["intent"] == "correction"
+    assert result["target_expense_id"] == 42
+    assert result["correction_action"] == "edit_date"
+    assert result["days_ago"] == 2
 
 
 # ---------- parse_message: resilience (the actual production bug) ----------
@@ -95,18 +149,16 @@ def test_parse_message_never_raises_on_api_failure(monkeypatch):
     never propagate out of parse_message. It must come back as a normal,
     gracefully-worded clarification dict instead."""
     _mock_client(monkeypatch, TypeError("Client.__init__() got an unexpected keyword argument 'proxies'"))
-    result = ai.parse_message("test message")
-    assert result["is_expense"] is False
-    assert result["needs_clarification"] is True
+    result = ai.parse_message("test message", [])
+    assert result["intent"] == "clarification"
     assert result["clarification_question"]  # some non-empty message, not None
     assert result["casual_reply"] is None
 
 
 def test_parse_message_falls_back_on_invalid_json(monkeypatch):
     _mock_client(monkeypatch, "this is not json at all")
-    result = ai.parse_message("garbled")
-    assert result["is_expense"] is False
-    assert result["needs_clarification"] is True
+    result = ai.parse_message("garbled", [])
+    assert result["intent"] == "clarification"
 
 
 # ---------- categorize: resilience ----------

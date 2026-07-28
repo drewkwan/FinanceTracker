@@ -137,12 +137,50 @@ Or skip commands and just type naturally:
 The bot asks a quick follow-up only when it's genuinely unsure (missing
 amount, ambiguous category, or a large charge with no claimable hint). It
 only asks about currency if you never mention one — otherwise it defaults to
-your base currency.
+your base currency. A bare currency symbol with no letters (e.g. just "$")
+also defaults to your base currency rather than being assumed to mean USD.
 
-Undo/edit/delete are balance-safe: if you correct an expense logged on a
-previous day (already rolled into your balance), the balance is adjusted
-retroactively so the numbers stay accurate. Same-day corrections don't need
-any adjustment since today's spend is always computed live.
+You can also correct something you already logged just by talking about it,
+without needing the expense's ID:
+
+> that was for yesterday, not today
+> no, my lunch was in SGD not USD
+> you double logged my lunch, delete one
+> that log from yesterday was wrong, tag it to the day before instead
+
+The bot looks at your last few logged expenses, figures out which one you
+mean — by amount, description, or a date reference alone (e.g. "yesterday's
+log" is enough on its own if only one recent expense was logged then) — and
+applies the fix: changing the date (including "3 days ago", not just
+today/yesterday), currency, amount, description, category, or deleting it
+outright. Every one of those replies with a real before/after confirmation
+built from what's actually in the database (never a made-up "done!" — that
+was a real bug this fixed), and the very next message can be a bare `undo`,
+`no`, or `wrong` to revert exactly that one change. If it can't confidently
+tell which of your recent expenses you mean, it asks rather than guessing —
+pointing you at `/recent` to get an ID for `/edit`/`/delete` if needed. This
+only looks at roughly your last 8 expenses; older corrections still need the
+explicit commands. If a message describes more than one correction at once,
+it resolves the clearer one and you can follow up separately for the other.
+
+Asking to see your balance or recent expenses in plain English works too —
+"show me my balance" or "what have I logged today" answers immediately with
+the real numbers, the same as `/balance`/`/recent` would, rather than just
+telling you to go type the command.
+
+Undo/edit/delete (including natural-language corrections) are balance-safe:
+if you correct an expense logged on a previous day (already rolled into your
+balance), the balance is adjusted retroactively so the numbers stay
+accurate. Same-day corrections don't need any adjustment since today's spend
+is always computed live.
+
+Two things the bot deliberately never does: it never claims to have
+performed an edit, deletion, or "note" unless it actually called the
+underlying database function first (its casual chat replies are talk-only
+and can't represent an action having been taken), and it never denies a
+capability that actually exists (e.g. claiming it can't show your balance or
+recent expenses) — it knows its own real command list and will point you at
+the right one instead of inventing a limitation.
 
 `/summary` is entirely on-demand — nothing about trends or patterns is ever
 pushed to you unprompted. Ask for it and it'll surface whatever's actually
