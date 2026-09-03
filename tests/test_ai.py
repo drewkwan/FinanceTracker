@@ -57,8 +57,9 @@ def _mock_client(monkeypatch, create_return):
 
 def test_parse_message_returns_parsed_log_expense(monkeypatch):
     payload = {
-        "intent": "log_expense", "amount": 12.5, "currency": None, "description": "lunch",
-        "category": "Food", "is_claimable": False,
+        "intent": "log_expense",
+        "expenses": [{"amount": 12.5, "currency": None, "description": "lunch",
+                       "category": "Food", "is_claimable": False}],
         "target_expense_id": None, "correction_action": None, "days_ago": None,
         "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
         "clarification_question": None, "casual_reply": None,
@@ -66,18 +67,39 @@ def test_parse_message_returns_parsed_log_expense(monkeypatch):
     _mock_client(monkeypatch, json.dumps(payload))
     result = ai.parse_message("spent 12.50 on lunch", [])
     assert result["intent"] == "log_expense"
-    assert result["amount"] == 12.5
+    assert result["expenses"][0]["amount"] == 12.5
 
 
 def test_parse_message_strips_markdown_code_fence(monkeypatch):
-    payload = {"intent": "log_expense", "amount": 5, "currency": None, "description": "coffee",
-               "category": "Food", "is_claimable": False,
+    payload = {"intent": "log_expense",
+               "expenses": [{"amount": 5, "currency": None, "description": "coffee",
+                              "category": "Food", "is_claimable": False}],
                "target_expense_id": None, "correction_action": None, "days_ago": None,
                "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
                "clarification_question": None, "casual_reply": None}
     _mock_client(monkeypatch, f"```json\n{json.dumps(payload)}\n```")
     result = ai.parse_message("coffee 5", [])
-    assert result["amount"] == 5
+    assert result["expenses"][0]["amount"] == 5
+
+
+def test_parse_message_returns_multiple_expenses_in_one_message(monkeypatch):
+    """Regression test for a real user complaint: '$5 for lunch and $5 for
+    coffee' must come back as two separate items, not just the first one."""
+    payload = {
+        "intent": "log_expense",
+        "expenses": [
+            {"amount": 5, "currency": None, "description": "lunch", "category": "Food", "is_claimable": False},
+            {"amount": 5, "currency": None, "description": "coffee", "category": "Food", "is_claimable": False},
+        ],
+        "target_expense_id": None, "correction_action": None, "days_ago": None,
+        "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+        "clarification_question": None, "casual_reply": None,
+    }
+    _mock_client(monkeypatch, json.dumps(payload))
+    result = ai.parse_message("$5 for lunch and $5 for coffee", [])
+    assert result["intent"] == "log_expense"
+    assert len(result["expenses"]) == 2
+    assert {e["description"] for e in result["expenses"]} == {"lunch", "coffee"}
 
 
 def test_parse_message_passes_recent_expenses_into_the_prompt(monkeypatch):
@@ -171,6 +193,21 @@ def test_categorize_returns_model_choice_when_valid(monkeypatch):
 def test_categorize_defaults_to_other_on_invalid_category(monkeypatch):
     _mock_client(monkeypatch, "NotARealCategory")
     assert ai.categorize("mystery purchase") == "Other"
+
+
+def test_categorize_accepts_gifts_and_hobbies_categories(monkeypatch):
+    """Regression guard for the category expansion: 'Gifts & Occasions' and
+    'Hobbies & Collectibles' must be accepted as valid, not fall back to
+    'Other' just because they're multi-word/new."""
+    import config
+    assert "Gifts & Occasions" in config.CATEGORIES
+    assert "Hobbies & Collectibles" in config.CATEGORIES
+
+    _mock_client(monkeypatch, "Gifts & Occasions")
+    assert ai.categorize("wedding ang pow") == "Gifts & Occasions"
+
+    _mock_client(monkeypatch, "Hobbies & Collectibles")
+    assert ai.categorize("pokemon card booster box") == "Hobbies & Collectibles"
 
 
 def test_categorize_never_raises_on_api_failure(monkeypatch):

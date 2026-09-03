@@ -62,5 +62,10 @@ CATEGORIES = [
     "Bills & Utilities",
     "Health",
     "Travel",
+    "Gifts & Occasions",
+    "Hobbies & Collectibles",
     "Other",
 ]
+
+# Meal types for /logmeal and natural-language meal logging.
+MEAL_TYPES = ["Breakfast", "Lunch", "Dinner", "Snack"]

@@ -2,7 +2,10 @@
 
 Tracks a daily spending allowance with rollover, keeps claimable/reimbursable
 expenses separate, supports multiple currencies, and uses Claude to categorize
-purchases and answer free-form questions about your spending.
+purchases and answer free-form questions about your spending. Also tracks
+meals (text or a photo, with a calorie range and a running daily total),
+workouts, and daily vitals check-ins (weight, sleep, knee pain), all in the
+same database, through the same natural-language pattern.
 
 ## How the money math works
 
@@ -31,6 +34,42 @@ purchases and answer free-form questions about your spending.
   plus your average spend by day-of-week (over an 8-week lookback) and how
   many days in the period you stayed under target. Claude turns all of that
   into a few plain-language lines rather than a data dump — see "Usage" below.
+
+## How meal and workout logging works
+
+- **Meals are logged as items, not meal slots.** Send "coke zero and 750ml
+  water" or a photo of your dinner and it's logged as-is — there's no
+  requirement to file it under breakfast/lunch/dinner/snack (`meal_type` is
+  set when it's obvious, left blank otherwise).
+- **Calories are a range, not a false-precise number.** Every meal gets a
+  `calories_low`–`calories_high` estimate plus a central `calories_estimate`
+  (what running totals sum), the same way a careful human estimate would be
+  given — never a single suspiciously exact figure.
+- **Photos work directly** — send a picture of your food, with or without a
+  caption, and no command needed; Claude estimates portions from the image
+  the same way it estimates from a text description, refining with the
+  caption when there is one.
+- **Water is tracked separately from calories.** Mention plain water (e.g.
+  "750ml water") and it adds to a running `water_ml` total for the day,
+  never estimated for other drinks.
+- Every meal/photo reply includes the day's running calorie (and water, if
+  any) total, not just the item just logged.
+- **Workouts** (`/logworkout` or natural language, e.g. "played tennis for an
+  hour, won 2 sets") capture activity, duration, distance when mentioned, and
+  free-text notes for anything else worth keeping (splits, sets, how it felt)
+  rather than forcing structure that isn't there yet.
+- **Vitals** (`/logvitals` or natural language, e.g. "weight 76.6, slept 5.5
+  hours, knee 2/10") log whatever you mention — weight, sleep hours, knee
+  pain (0-10), and free-text notes — leaving anything you didn't mention
+  blank rather than forcing every check-in to be complete.
+- **Corrections** work the same way as expenses for the common cases — "that
+  meal was actually two days ago" or "delete that, I logged it twice" both
+  resolve by natural language, with the same before/after confirmation and
+  one-word `undo`. This applies to meals, workouts, and vitals check-ins too.
+  Field-level edits (fixing a calorie estimate, activity name, or a vitals
+  reading) aren't wired up yet for any of the three — only moving the date or
+  deleting an entry — so a request for anything else gets a clarifying
+  message rather than being silently ignored.
 
 ## Files
 
@@ -125,6 +164,14 @@ Message your bot on Telegram — `/start` should reply immediately.
 /undo                            remove the single most recent expense
 /edit <id> <amount> [desc...]    fix a mislogged expense
 /delete <id>                     remove a specific expense by ID
+
+/logmeal <description>           log food/drink, e.g. /logmeal chicken rice and iced tea
+                                  (or just send a photo of your food, caption optional)
+/recentmeals [n]                 last n logged meals (default 10)
+/logworkout <description>        log a workout, e.g. /logworkout tennis for an hour
+/recentworkouts [n]              last n logged workouts (default 10)
+/logvitals <description>         log a check-in, e.g. /logvitals weight 76.6, knee 2/10
+/recentvitals [n]                last n logged check-ins (default 10)
 ```
 
 Or skip commands and just type naturally:
@@ -133,6 +180,11 @@ Or skip commands and just type naturally:
 > paid 300 for the team dinner, claimable
 > got groceries for 84 bucks
 > spent 20 USD on a hotel
+> coke zero and 750ml water
+> had a mango
+> played tennis for an hour, won 2 sets
+> did IPPT training, ran 2.4km in 10:45
+> weight 76.6, slept 5.5 hours, knee 2/10
 
 The bot asks a quick follow-up only when it's genuinely unsure (missing
 amount, ambiguous category, or a large charge with no claimable hint). It

@@ -12,12 +12,27 @@ Design (see README for the full explanation):
   `is_claimable` separates "claim this back from someone" spending from your
   personal daily allowance. `is_claimed` marks claimables that have been
   reimbursed and cleared.
+- `meals`: one row per logged food/drink item or entry (not one row per meal
+  slot -- matches how this is actually used: logged as things are eaten
+  throughout the day, not decomposed into breakfast/lunch/dinner buckets).
+  Calories are stored as a `calories_low`/`calories_high`/`calories_estimate`
+  range rather than a single false-precise number, matching the estimate
+  style already validated by hand in ChatGPT. `water_ml` is a separate axis
+  (hydration, not calories) and is null on entries that aren't plain water.
+- `workouts`: one row per logged session. `notes` stays free text rather than
+  forcing IPPT times or tennis sets into rigid columns before it's clear
+  what's worth tracking structurally.
+- `vitals`: one row per daily check-in (weight, sleep, knee pain, or any
+  subset -- all nullable, since not every check-in reports everything).
+  Separate from `workouts` because it's reported on its own cadence, not
+  tied to a specific session.
 
 Rollover math (matches the spec exactly):
   Day 1: target=$100, spend $30 -> leftover = $100 - $30 = $70 -> balance += 70
   Day 2: available = target($100) + balance($70) = $170
 """
 
+import json
 import sqlite3
 from datetime import date, timedelta
 from contextlib import contextmanager
@@ -69,6 +84,44 @@ def init_db():
                 is_claimable INTEGER NOT NULL DEFAULT 0,
                 is_claimed INTEGER NOT NULL DEFAULT 0,
                 expense_date TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                meal_type TEXT,
+                items TEXT,
+                calories_low REAL,
+                calories_high REAL,
+                calories_estimate REAL,
+                water_ml REAL,
+                meal_date TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workouts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                activity TEXT,
+                duration_min REAL,
+                distance_km REAL,
+                notes TEXT,
+                workout_date TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS vitals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                weight_kg REAL,
+                sleep_hours REAL,
+                knee_pain REAL,
+                notes TEXT,
+                vitals_date TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -440,3 +493,280 @@ def get_daily_totals(chat_id, start_date, end_date):
             (chat_id, start_date, end_date),
         ).fetchall()
         return {r["expense_date"]: r["total"] for r in rows}
+
+
+def get_month_to_date_total(chat_id):
+    """Sum of non-claimable spend (base currency) from the 1st of the
+    current month through today (inclusive). Computed fresh from the raw
+    expense rows every call -- no stored running total, so this needed no
+    schema change and naturally resets to zero on the 1st of every month
+    with zero migration risk, alongside (not replacing) the existing
+    rolling `balance` on the user row."""
+    today = date.fromisoformat(today_str())
+    month_start = today.replace(day=1)
+    tomorrow = today + timedelta(days=1)
+    totals = get_category_totals(chat_id, month_start.isoformat(), tomorrow.isoformat())
+    return {
+        "total": round(sum(r["total"] for r in totals), 2),
+        "month_start": month_start.isoformat(),
+        "today": today.isoformat(),
+        "days_elapsed": (today - month_start).days + 1,
+    }
+
+
+# ---------- meals ----------
+# Each row is one logged item/entry, not one row per meal slot -- see the
+# module docstring. calories_estimate is the number everything else (running
+# totals, /summary-style rollups) sums; low/high are kept for display only.
+
+def _meal_row(row):
+    d = dict(row)
+    try:
+        d["items"] = json.loads(d["items"]) if d["items"] else []
+    except (TypeError, json.JSONDecodeError):
+        d["items"] = []
+    return d
+
+
+def add_meal(chat_id, meal_type, items, calories_low, calories_high, calories_estimate, water_ml=None):
+    """items: list of strings. Never raises on bad estimate math -- a null
+    calories_estimate is stored as-is rather than blocking the log (mirrors
+    fx.py's "never block on an estimate/lookup failure" discipline)."""
+    get_or_create_user(chat_id)
+    items_json = json.dumps(items or [])
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meals (chat_id, meal_type, items, calories_low, calories_high, "
+            "calories_estimate, water_ml, meal_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, meal_type, items_json, calories_low, calories_high, calories_estimate,
+             water_ml, today_str()),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_recent_meals(chat_id, limit=10):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meals WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [_meal_row(r) for r in rows]
+
+
+def get_meal(chat_id, meal_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id)
+        ).fetchone()
+        return _meal_row(row) if row else None
+
+
+def get_daily_meal_totals(chat_id, day_str):
+    """Running totals for one day -- the reply pattern this mirrors (from the
+    ChatGPT thread this replaces) always shows a running calorie/water total
+    alongside each new item, not just the item just logged."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(calories_estimate), 0) AS calories, "
+            "COALESCE(SUM(water_ml), 0) AS water_ml FROM meals "
+            "WHERE chat_id = ? AND meal_date = ?",
+            (chat_id, day_str),
+        ).fetchone()
+        return {"calories": row["calories"], "water_ml": row["water_ml"]}
+
+
+def edit_meal_date(chat_id, meal_id, new_date_str):
+    """Moves a meal to a different meal_date. Unlike expenses, meals don't
+    feed a rolling balance, so this is a plain field update -- no balance
+    adjustment needed. Dates after today are clamped to today."""
+    row = get_meal(chat_id, meal_id)
+    if row is None:
+        return None
+    today = today_str()
+    if new_date_str > today:
+        new_date_str = today
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE meals SET meal_date = ? WHERE id = ? AND chat_id = ?",
+            (new_date_str, meal_id, chat_id),
+        )
+    return get_meal(chat_id, meal_id)
+
+
+def delete_meal(chat_id, meal_id):
+    row = get_meal(chat_id, meal_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id))
+    return row
+
+
+def delete_most_recent_meal(chat_id):
+    recent = get_recent_meals(chat_id, limit=1)
+    if not recent:
+        return None
+    return delete_meal(chat_id, recent[0]["id"])
+
+
+def restore_deleted_meal(chat_id, row):
+    """Re-inserts a previously deleted meal row exactly as it was. Used for
+    one-step 'undo' after a natural-language correction deletes the wrong
+    entry -- gets a fresh row id, every other field preserved."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meals (chat_id, meal_type, items, calories_low, calories_high, "
+            "calories_estimate, water_ml, meal_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, row["meal_type"], json.dumps(row["items"]), row["calories_low"],
+             row["calories_high"], row["calories_estimate"], row["water_ml"], row["meal_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_meal(chat_id, new_id)
+
+
+# ---------- workouts ----------
+
+def add_workout(chat_id, activity, duration_min=None, distance_km=None, notes=None):
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, notes, workout_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, activity, duration_min, distance_km, notes, today_str()),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_recent_workouts(chat_id, limit=10):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM workouts WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_workout(chat_id, workout_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM workouts WHERE id = ? AND chat_id = ?", (workout_id, chat_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def edit_workout_date(chat_id, workout_id, new_date_str):
+    row = get_workout(chat_id, workout_id)
+    if row is None:
+        return None
+    today = today_str()
+    if new_date_str > today:
+        new_date_str = today
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE workouts SET workout_date = ? WHERE id = ? AND chat_id = ?",
+            (new_date_str, workout_id, chat_id),
+        )
+    return get_workout(chat_id, workout_id)
+
+
+def delete_workout(chat_id, workout_id):
+    row = get_workout(chat_id, workout_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM workouts WHERE id = ? AND chat_id = ?", (workout_id, chat_id))
+    return row
+
+
+def delete_most_recent_workout(chat_id):
+    recent = get_recent_workouts(chat_id, limit=1)
+    if not recent:
+        return None
+    return delete_workout(chat_id, recent[0]["id"])
+
+
+def restore_deleted_workout(chat_id, row):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, notes, workout_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, row["activity"], row["duration_min"], row["distance_km"], row["notes"],
+             row["workout_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_workout(chat_id, new_id)
+
+
+# ---------- vitals ----------
+# One row per daily check-in. All fields nullable -- a check-in commonly
+# reports only some of weight/sleep/knee, plus a free-text note.
+
+def add_vitals(chat_id, weight_kg=None, sleep_hours=None, knee_pain=None, notes=None):
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO vitals (chat_id, weight_kg, sleep_hours, knee_pain, notes, vitals_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, weight_kg, sleep_hours, knee_pain, notes, today_str()),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_recent_vitals(chat_id, limit=10):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM vitals WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_vitals(chat_id, vitals_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM vitals WHERE id = ? AND chat_id = ?", (vitals_id, chat_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def edit_vitals_date(chat_id, vitals_id, new_date_str):
+    row = get_vitals(chat_id, vitals_id)
+    if row is None:
+        return None
+    today = today_str()
+    if new_date_str > today:
+        new_date_str = today
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE vitals SET vitals_date = ? WHERE id = ? AND chat_id = ?",
+            (new_date_str, vitals_id, chat_id),
+        )
+    return get_vitals(chat_id, vitals_id)
+
+
+def delete_vitals(chat_id, vitals_id):
+    row = get_vitals(chat_id, vitals_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM vitals WHERE id = ? AND chat_id = ?", (vitals_id, chat_id))
+    return row
+
+
+def delete_most_recent_vitals(chat_id):
+    recent = get_recent_vitals(chat_id, limit=1)
+    if not recent:
+        return None
+    return delete_vitals(chat_id, recent[0]["id"])
+
+
+def restore_deleted_vitals(chat_id, row):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO vitals (chat_id, weight_kg, sleep_hours, knee_pain, notes, vitals_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, row["weight_kg"], row["sleep_hours"], row["knee_pain"], row["notes"],
+             row["vitals_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_vitals(chat_id, new_id)

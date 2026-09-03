@@ -370,3 +370,38 @@ def test_restore_deleted_expense_preserves_claimable_flag():
     restored = db.restore_deleted_expense(CHAT, deleted)
     assert restored["is_claimable"] == 1
     assert db.get_status(CHAT)["pending_claimable"] == 300
+
+
+# ---------- month-to-date ----------
+
+def test_month_to_date_total_only_counts_current_month():
+    """The rolling `balance` is supplemented, not replaced, by a fresh
+    month-to-date figure -- this must reset to zero on the 1st and ignore
+    spend from prior months entirely, computed straight from expense_date
+    with no stored running total (so it needs no schema change)."""
+    db.get_or_create_user(CHAT)
+    today = date.today()
+    first_of_month = today.replace(day=1)
+    last_month_day = first_of_month - timedelta(days=1)
+
+    _insert_on(CHAT, last_month_day, 999)  # must be excluded
+    _insert_on(CHAT, first_of_month, 30)
+    db.add_expense(CHAT, 20, "SGD", "today thing", "Food")  # today
+
+    mtd = db.get_month_to_date_total(CHAT)
+    assert mtd["total"] == 50.0
+    assert mtd["month_start"] == first_of_month.isoformat()
+    assert mtd["today"] == today.isoformat()
+    assert mtd["days_elapsed"] == (today - first_of_month).days + 1
+
+
+def test_month_to_date_total_ignores_claimable_expenses():
+    db.get_or_create_user(CHAT)
+    db.add_expense(CHAT, 300, "SGD", "team dinner", "Food", is_claimable=True)
+    db.add_expense(CHAT, 20, "SGD", "coffee", "Food")
+    assert db.get_month_to_date_total(CHAT)["total"] == 20.0
+
+
+def test_month_to_date_total_zero_with_no_expenses():
+    db.get_or_create_user(CHAT)
+    assert db.get_month_to_date_total(CHAT)["total"] == 0.0

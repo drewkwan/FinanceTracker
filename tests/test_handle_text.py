@@ -52,7 +52,7 @@ def _run(coro):
 def _clarification(question):
     return {
         "intent": "clarification", "clarification_question": question,
-        "amount": None, "currency": None, "description": None, "category": None, "is_claimable": None,
+        "expenses": None,
         "target_expense_id": None, "correction_action": None, "days_ago": None,
         "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
         "casual_reply": None,
@@ -61,8 +61,9 @@ def _clarification(question):
 
 def _log_expense(amount, description, category):
     return {
-        "intent": "log_expense", "amount": amount, "currency": None, "description": description,
-        "category": category, "is_claimable": False,
+        "intent": "log_expense",
+        "expenses": [{"amount": amount, "currency": None, "description": description,
+                       "category": category, "is_claimable": False}],
         "target_expense_id": None, "correction_action": None, "days_ago": None,
         "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
         "clarification_question": None, "casual_reply": None,
@@ -84,7 +85,7 @@ def test_multi_round_clarification_accumulates_context_instead_of_overwriting(mo
     ])
     captured_texts = []
 
-    def fake_parse_message(text, recent_expenses=None):
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
         captured_texts.append(text)
         return next(responses)
 
@@ -113,9 +114,63 @@ def test_multi_round_clarification_accumulates_context_instead_of_overwriting(mo
     assert bot.PENDING_KEY not in context.chat_data  # cleared once resolved
 
 
+def test_multiple_expenses_in_one_message_are_all_logged(monkeypatch):
+    """Regression test for a real user complaint: '$5 for lunch and $5 for
+    coffee' must log two separate expenses, not just the first (or fail
+    outright)."""
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
+        return {
+            "intent": "log_expense",
+            "expenses": [
+                {"amount": 5, "currency": None, "description": "lunch", "category": "Food", "is_claimable": False},
+                {"amount": 5, "currency": None, "description": "coffee", "category": "Food", "is_claimable": False},
+            ],
+            "target_expense_id": None, "correction_action": None, "days_ago": None,
+            "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "$5 for lunch and $5 for coffee")
+    _run(bot.handle_text(update, context))
+    reply = update.message.replies[-1]
+    assert "lunch" in reply and "coffee" in reply
+    assert "Logged 2 expenses" in reply
+    assert len(db.get_recent_expenses(CHAT, limit=5)) == 2
+    assert db.get_status(CHAT)["spent_today"] == 10.0
+
+
+def test_single_expense_reply_wording_unchanged(monkeypatch):
+    """Guards against the multi-expense change regressing the common case --
+    a single logged expense should still read 'Logged:', not 'Logged 1
+    expenses:'."""
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
+        return {
+            "intent": "log_expense",
+            "expenses": [{"amount": 12.5, "currency": None, "description": "lunch",
+                           "category": "Food", "is_claimable": False}],
+            "target_expense_id": None, "correction_action": None, "days_ago": None,
+            "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "spent 12.50 on lunch")
+    _run(bot.handle_text(update, context))
+    assert update.message.replies[-1].startswith("Logged:")
+
+
 def _no_op_extra_fields():
     return {
-        "amount": None, "currency": None, "description": None, "category": None, "is_claimable": None,
+        "expenses": None,
         "target_expense_id": None, "correction_action": None, "days_ago": None,
         "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
     }
@@ -130,7 +185,7 @@ def test_show_balance_answers_directly_with_real_numbers(monkeypatch):
     db.add_expense(CHAT, 20, "SGD", "coffee", "Food")
     context = FakeContext()
 
-    def fake_parse_message(text, recent_expenses=None):
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
         return {"intent": "show_balance", "clarification_question": None, "casual_reply": None,
                 **_no_op_extra_fields()}
 
@@ -139,6 +194,7 @@ def test_show_balance_answers_directly_with_real_numbers(monkeypatch):
     _run(bot.handle_text(update, context))
     assert update.message.replies[-1] == bot._balance_text(CHAT)
     assert "Spent today" in update.message.replies[-1]
+    assert "Month to date" in update.message.replies[-1]
 
 
 def test_show_recent_answers_directly_with_real_data(monkeypatch):
@@ -146,7 +202,7 @@ def test_show_recent_answers_directly_with_real_data(monkeypatch):
     db.add_expense(CHAT, 15, "SGD", "cab ride", "Transport")
     context = FakeContext()
 
-    def fake_parse_message(text, recent_expenses=None):
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
         return {"intent": "show_recent", "clarification_question": None, "casual_reply": None,
                 **_no_op_extra_fields()}
 
@@ -175,11 +231,11 @@ def test_correction_can_target_by_date_reference_alone(monkeypatch):
     target = db.get_recent_expenses(CHAT, limit=1)[0]
     context = FakeContext()
 
-    def fake_parse_message(text, recent_expenses=None):
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None):
         return {
             "intent": "correction", "target_expense_id": target["id"], "correction_action": "edit_date",
             "days_ago": 2, "clarification_question": None, "casual_reply": None,
-            "amount": None, "currency": None, "description": None, "category": None, "is_claimable": None,
+            "expenses": None,
             "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
         }
 
