@@ -97,6 +97,25 @@ Morrow keeps two separate, deliberately different kinds of memory (see
   - Remove something: `/forget <label>`, or naturally ("forget the Bugis gym
     plan") — reverses with one-word `undo`, same as other corrections.
 
+## How the rundown works
+
+`/rundown`, or asking naturally ("how am I doing", "how's my week been",
+"give me a rundown"), answers across all four domains at once instead of
+just one. Unlike a `casual` reply, it doesn't let Claude guess at numbers
+from the short recent-items lists already in context — `bot.py` computes
+real 7-day figures first (today's balance status, meal count/calories/
+water, workout count/activities, vitals check-ins/latest weight/weight
+change/average sleep/average knee pain), and only hands those real numbers
+to Claude to narrate into a few short lines. A domain with nothing logged
+that week is left out rather than reported as a misleading zero. If the
+Claude call itself fails, it falls back to a plain, deterministic breakdown
+of the same numbers — never silent, same discipline as `/summary`.
+
+That's the dividing line from `/balance` and `/recent`: those stay
+expense-only and answer *today's* numbers directly; `/rundown` is the one
+that reads across money, food, training, and vitals together over the
+last week.
+
 ## Files
 
 | File | Purpose |
@@ -201,6 +220,8 @@ Message your bot on Telegram — `/start` should reply immediately.
 
 /memory                          list everything currently remembered
 /forget <label>                  remove a remembered item (see /memory for exact labels)
+
+/rundown                         cross-domain check-in: money + food + training + vitals, last 7 days
 ```
 
 Or skip commands and just type naturally:
@@ -217,6 +238,7 @@ Or skip commands and just type naturally:
 > remember I go to Fitness First Bugis Tue/Thu for legs and back
 > forget the Bugis gym plan
 > what's my split today? (answered from what's already remembered, no lookup command needed)
+> how am I doing this week? (a real cross-domain check-in, not a guess)
 
 And beyond logging/remembering, just talk to it — Morrow keeps the last
 stretch of the conversation in context (see "How memory works" above), so

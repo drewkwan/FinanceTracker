@@ -583,6 +583,19 @@ def get_recent_meals(chat_id, limit=10):
         return [_meal_row(r) for r in rows]
 
 
+def get_meals_in_range(chat_id, start_date, end_date):
+    """Meal rows in [start_date, end_date) -- both ISO date strings,
+    end_date exclusive. Same bounds convention as get_category_totals --
+    used for the rundown synthesis (bot.py's _rundown_payload), not for
+    display, so it returns full rows rather than a pre-aggregated total."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meals WHERE chat_id = ? AND meal_date >= ? AND meal_date < ? ORDER BY id",
+            (chat_id, start_date, end_date),
+        ).fetchall()
+        return [_meal_row(r) for r in rows]
+
+
 def get_meal(chat_id, meal_id):
     with get_conn() as conn:
         row = conn.execute(
@@ -676,6 +689,17 @@ def get_recent_workouts(chat_id, limit=10):
         return [dict(r) for r in rows]
 
 
+def get_workouts_in_range(chat_id, start_date, end_date):
+    """See get_meals_in_range's docstring -- same convention, used by
+    bot.py's _rundown_payload."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM workouts WHERE chat_id = ? AND workout_date >= ? AND workout_date < ? ORDER BY id",
+            (chat_id, start_date, end_date),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_workout(chat_id, workout_id):
     with get_conn() as conn:
         row = conn.execute(
@@ -747,6 +771,18 @@ def get_recent_vitals(chat_id, limit=10):
         rows = conn.execute(
             "SELECT * FROM vitals WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
             (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_vitals_in_range(chat_id, start_date, end_date):
+    """See get_meals_in_range's docstring -- same convention, used by
+    bot.py's _rundown_payload. Ordered oldest-first so callers can read
+    weights[0]/weights[-1] as "start of window" / "latest" directly."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM vitals WHERE chat_id = ? AND vitals_date >= ? AND vitals_date < ? ORDER BY id",
+            (chat_id, start_date, end_date),
         ).fetchall()
         return [dict(r) for r in rows]
 

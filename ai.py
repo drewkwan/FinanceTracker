@@ -70,7 +70,8 @@ COMMAND_LIST = (
     "/recentmeals [n] (last n logged meals), "
     "/logworkout <description> (log a workout), /recentworkouts [n] (last n logged workouts), "
     "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n], "
-    "/memory (list everything currently remembered), /forget <label> (remove a remembered item)"
+    "/memory (list everything currently remembered), /forget <label> (remove a remembered item), "
+    "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days)"
 )
 
 PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
@@ -95,7 +96,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "correction" | "show_balance" | "show_recent" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "correction" | "show_balance" | "show_recent" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -191,11 +192,19 @@ Deciding the intent:
   directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,
   because that command does exactly this and there's no reason to make the user type it separately. Only use
   this for TODAY's live balance; a request for a specific past day's balance (which isn't tracked historically)
-  should be "casual", explaining that limitation. This intent is expense-only -- a request for today's calorie
-  or water total isn't "show_balance" (no such intent exists yet; treat it as "casual" and say so plainly).
+  should be "casual", explaining that limitation. This intent is expense-only -- a broad "how am I doing"
+  covering more than money is "rundown" instead (below), not "show_balance".
 - "show_recent": the message is asking to see recently logged expenses (e.g. "show me today's log", "what
   have I logged recently", "show me my expenses"). Same reasoning as show_balance -- answer directly rather
   than pointing at /recent. Expense-only, same caveat as show_balance for meals/workouts.
+- "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain -- money, food,
+  training, and vitals together -- not a single domain's number (e.g. "how am I doing", "how's my week been",
+  "give me a rundown", "how am I doing overall", "what's going on with me lately"). This pulls real 7-day
+  figures across all four domains and synthesizes them in code, the same "real numbers in, never guessed"
+  discipline as show_balance/show_recent -- so use it whenever the ask is genuinely cross-domain or open-ended
+  about how things are going overall. A question clearly about just one domain (a specific meal, a single
+  workout, a vitals reading) is NOT a rundown -- that's "casual", answered in-line from context, or points at
+  the matching /recent-style command.
 - "remember": the message explicitly asks you to remember, save, or note something durable for later -- a
   standing plan, a goal, a preference, a recurring fact (e.g. "remember I go to Fitness First Bugis Tue/Thu for
   legs and back", "my goal is 75kg by December", "remember I'm allergic to shellfish", "note that I prefer
@@ -521,6 +530,40 @@ def answer_with_trends(period: str, payload: dict) -> str:
             "matter-of-fact and useful, not alarmist or nagging."
         ),
         messages=[{"role": "user", "content": f"Period: {period}\nData: {data_str}"}],
+    )
+    return resp.content[0].text.strip()
+
+
+def answer_with_rundown(payload: dict) -> str:
+    """payload holds the last 7 days across all four domains -- today's
+    balance status, meal count/calories/water, workout count/activities,
+    and vitals check-ins/latest weight/weight change/avg sleep/avg knee
+    pain -- computed deterministically in Python (see bot.py's
+    _rundown_payload), never estimated by the model. Returns a short
+    cross-domain narrative, called only when the user asks a broad "how am
+    I doing" question (the "rundown" intent), never pushed unprompted.
+    Same discipline as answer_with_trends -- real numbers in, plain-language
+    narrative out, thin sections skipped rather than padded."""
+    client = _get_client()
+    data_str = json.dumps(payload)
+    resp = client.messages.create(
+        model=config.CLAUDE_MODEL,
+        max_tokens=450,
+        system=(
+            "You are Morrow, a personal companion, giving a short cross-domain check-in when asked "
+            "something like 'how am I doing'. You're given the last 7 days of real computed figures "
+            "across money (today's balance status), food (meal count, total estimated calories, water), "
+            "training (workout count and activities), and vitals (check-in count, latest weight, weight "
+            "change over the week, average sleep, average knee pain). Any section can be empty or null "
+            "(nothing logged that domain this week) -- skip it silently rather than mentioning its "
+            "absence or guessing at a number that isn't there. Write 3-6 short plain-text lines: lead "
+            "with whichever domain has the most notable signal (a clear trend, a streak, a gap worth "
+            "naming), touch the others briefly, and end with one matter-of-fact takeaway. No markdown "
+            "headers or bullet symbols -- plain conversational lines, the way a companion would actually "
+            "talk, not a report. Matter-of-fact and useful, never alarmist or nagging, and never invent "
+            "a number that isn't in the data."
+        ),
+        messages=[{"role": "user", "content": data_str}],
     )
     return resp.content[0].text.strip()
 
