@@ -109,7 +109,8 @@ def test_natural_language_log_vitals(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None,
-                            recent_workouts=None, recent_vitals=None):
+                            recent_workouts=None, recent_vitals=None,
+                            recent_messages=None, memory_list=None):
         return {"intent": "log_vitals", "weight_kg": 76.6, "sleep_hours": 5.5,
                 "knee_pain": 2, "vitals_notes": None,
                 "clarification_question": None, "casual_reply": None}
@@ -142,7 +143,8 @@ def test_correction_can_target_vitals_by_domain(monkeypatch):
     vitals_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=5.5, knee_pain=2)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None,
-                            recent_workouts=None, recent_vitals=None):
+                            recent_workouts=None, recent_vitals=None,
+                            recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
             "correction_action": "delete", "days_ago": None,
@@ -161,7 +163,8 @@ def test_undo_reverts_a_vitals_deletion(monkeypatch):
     vitals_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=5.5, knee_pain=2)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None,
-                            recent_workouts=None, recent_vitals=None):
+                            recent_workouts=None, recent_vitals=None,
+                            recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
             "correction_action": "delete", "days_ago": None,
@@ -188,7 +191,8 @@ def test_undo_reverts_a_vitals_date_edit(monkeypatch):
     original_date = db.get_vitals(CHAT, vitals_id)["vitals_date"]
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None,
-                            recent_workouts=None, recent_vitals=None):
+                            recent_workouts=None, recent_vitals=None,
+                            recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
             "correction_action": "edit_date", "days_ago": 1,

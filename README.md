@@ -71,6 +71,32 @@ same database, through the same natural-language pattern.
   deleting an entry — so a request for anything else gets a clarifying
   message rather than being silently ignored.
 
+## How memory works
+
+Morrow keeps two separate, deliberately different kinds of memory (see
+`db.py`'s module docstring for the schema rationale):
+
+- **Rolling conversation history** (`messages` table) — every free-text turn,
+  both yours and Morrow's, logged automatically. The last ~30 turns are fed
+  into every AI call so the thread stays in context — "that", "it", and
+  follow-ups resolve the way they would in an ongoing chat, not a fresh form
+  each time. Nothing to manage here; it just accumulates. Slash commands
+  (`/log`, `/balance`, etc.) aren't logged to this yet, only natural-language
+  messages.
+- **Durable memory** (`memory` table) — standing goals, plans, and
+  preferences you explicitly ask Morrow to remember, e.g. "remember I go to
+  Fitness First Bugis Tue/Thu for legs and back" or "remember my goal is
+  75kg by December". Each saved item has a short label, an optional
+  category, and the actual content. Mention something later ("what's my
+  split today?") and Morrow can answer directly from the saved content — no
+  separate lookup step, since the full list is read into every call. Saying
+  "remember X" again about the same thing updates that label in place rather
+  than creating a duplicate.
+  - See everything saved: `/memory`, or ask naturally ("what do you
+    remember about me?").
+  - Remove something: `/forget <label>`, or naturally ("forget the Bugis gym
+    plan") — reverses with one-word `undo`, same as other corrections.
+
 ## Files
 
 | File | Purpose |
@@ -172,6 +198,9 @@ Message your bot on Telegram — `/start` should reply immediately.
 /recentworkouts [n]              last n logged workouts (default 10)
 /logvitals <description>         log a check-in, e.g. /logvitals weight 76.6, knee 2/10
 /recentvitals [n]                last n logged check-ins (default 10)
+
+/memory                          list everything currently remembered
+/forget <label>                  remove a remembered item (see /memory for exact labels)
 ```
 
 Or skip commands and just type naturally:
@@ -185,6 +214,14 @@ Or skip commands and just type naturally:
 > played tennis for an hour, won 2 sets
 > did IPPT training, ran 2.4km in 10:45
 > weight 76.6, slept 5.5 hours, knee 2/10
+> remember I go to Fitness First Bugis Tue/Thu for legs and back
+> forget the Bugis gym plan
+> what's my split today? (answered from what's already remembered, no lookup command needed)
+
+And beyond logging/remembering, just talk to it — Morrow keeps the last
+stretch of the conversation in context (see "How memory works" above), so
+it's not limited to boxed intents; it can hold up its end of an open,
+back-and-forth chat.
 
 The bot asks a quick follow-up only when it's genuinely unsure (missing
 amount, ambiguous category, or a large charge with no claimable hint). It
@@ -258,3 +295,12 @@ under ~10%) are left out rather than padding the message.
 - The streak counts days you stayed within your *plain daily target*, not
   your rolled-over balance — so it reflects daily discipline even if you're
   coasting on a big surplus.
+- The rolling conversation history only captures natural-language messages
+  through `handle_text`, not slash commands (`/log`, `/balance`, etc.) — so
+  a reply from `/logmeal` is logged (Morrow's side only), but the `/logmeal`
+  command itself isn't. Worth revisiting if command usage turns out to
+  matter for later context.
+- Durable memory has no size cap or automatic pruning yet — fine at personal
+  scale, but if the list grows very large it may eventually be worth
+  trimming or summarizing rather than reading the whole thing into every
+  prompt.

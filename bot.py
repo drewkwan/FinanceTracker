@@ -142,11 +142,23 @@ def _daily_meal_totals_text(chat_id: int) -> str:
     return line
 
 
+async def _reply(update: Update, chat_id: int, text: str):
+    """Send a Telegram reply AND persist it to the rolling conversation
+    history (db.add_message) -- used throughout the free-text (handle_text)
+    call path so Morrow's own turns land in short-term memory alongside the
+    user's, not just the structured domain tables. Slash commands don't go
+    through this yet (see handle_text's module notes) -- this is scoped to
+    the open-ended chat surface first."""
+    await update.message.reply_text(text)
+    db.add_message(chat_id, "morrow", text)
+
+
 async def _send_alert_if_needed(update: Update, chat_id: int):
     if db.maybe_alert(chat_id):
         status = db.get_status(chat_id)
         pct = int(config.BUDGET_ALERT_THRESHOLD * 100)
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Heads up: you've crossed {pct}% of today's available budget.\n\n{_status_text(status)}"
         )
 
@@ -174,8 +186,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "See recent workouts: /recentworkouts\n"
         "Log vitals: /logvitals weight 76.6, slept 5.5 hours, knee 2/10\n"
         "See recent check-ins: /recentvitals\n\n"
+        "See what I remember: /memory\n"
+        "Remove something remembered: /forget <label>\n\n"
         "Or just tell me naturally, e.g. \"spent 15 on uber\", \"had a mango\", \"played tennis for an hour\", "
-        "\"weight 76.6, slept 5.5 hours\"."
+        "\"weight 76.6, slept 5.5 hours\", or \"remember I go to Fitness First Bugis Tue/Thu\" -- and just talk "
+        "to me the rest of the time, I'll keep up with the thread."
     )
 
 
@@ -403,7 +418,8 @@ async def _log_meal_and_reply(update: Update, chat_id: int, data: dict):
     row = db.get_meal(chat_id, meal_id)
     items = ", ".join(row["items"]) or "meal"
     water_line = f"\nWater: +{row['water_ml']:.0f}ml" if row.get("water_ml") else ""
-    await update.message.reply_text(
+    await _reply(
+        update, chat_id,
         f"Logged: {items} -- {_calorie_range(row)}{water_line}\n\n{_daily_meal_totals_text(chat_id)}"
     )
 
@@ -495,7 +511,7 @@ async def _log_vitals_and_reply(update: Update, chat_id: int, data: dict):
     vitals_id = db.add_vitals(chat_id, data.get("weight_kg"), data.get("sleep_hours"),
                                data.get("knee_pain"), data.get("notes") or data.get("vitals_notes"))
     row = db.get_vitals(chat_id, vitals_id)
-    await update.message.reply_text(f"Logged: {_vitals_line(row)}")
+    await _reply(update, chat_id, f"Logged: {_vitals_line(row)}")
 
 
 async def logvitals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,6 +541,31 @@ async def recentvitals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No check-ins logged yet.")
         return
     await update.message.reply_text("Recent check-ins:\n" + "\n".join(_vitals_line(r) for r in rows))
+
+
+async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Explicit transparency command mirroring /recentmeals etc. -- lets the
+    user check exactly what's saved without needing to ask conversationally."""
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(_memory_text(chat_id))
+
+
+async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    label = " ".join(context.args)
+    if not label:
+        await update.message.reply_text("Usage: /forget <label> (see /memory for the exact labels)")
+        return
+    deleted = db.delete_memory_by_label(chat_id, label)
+    if not deleted:
+        await update.message.reply_text(f"Nothing saved under \"{label}\" -- run /memory to see the list.")
+        return
+    context.chat_data[LAST_CORRECTION_KEY] = {"domain": "memory", "action": "delete", "row": deleted}
+    await update.message.reply_text(f"Forgot \"{deleted['label']}\". Reply 'undo' if that's wrong.")
 
 
 WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -611,6 +652,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 PENDING_KEY = "pending_expense"
 LAST_CORRECTION_KEY = "last_correction"
 RECENT_EXPENSES_FOR_AI = 8  # how much history the model gets to resolve "that", "the duplicate", etc.
+RECENT_MESSAGES_FOR_AI = 30  # rolling conversation window -- see db.py's module docstring on messages vs memory
 
 # A short reply matching one of these, sent as the very next message after a
 # correction, reverts it directly -- deterministic and exact-match only (not
@@ -665,6 +707,28 @@ def _recent_vitals_for_ai(chat_id: int) -> list:
     ]
 
 
+def _recent_messages_for_ai(chat_id: int) -> list:
+    rows = db.get_recent_messages(chat_id, limit=RECENT_MESSAGES_FOR_AI)
+    return [{"role": r["role"], "content": r["content"]} for r in rows]
+
+
+def _memory_for_ai(chat_id: int) -> list:
+    rows = db.get_memory_list(chat_id)
+    return [{"label": r["label"], "category": r["category"], "content": r["content"]} for r in rows]
+
+
+def _memory_line(row: dict) -> str:
+    cat = f" [{row['category']}]" if row.get("category") else ""
+    return f"{row['label']}{cat}: {row['content']}"
+
+
+def _memory_text(chat_id: int) -> str:
+    rows = db.get_memory_list(chat_id)
+    if not rows:
+        return "I don't have anything saved yet -- tell me something to remember and I'll hold onto it."
+    return "What I remember:\n" + "\n".join(_memory_line(r) for r in rows)
+
+
 async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Returns True if there was something to revert (and replies about it),
     False if there was no pending correction snapshot at all."""
@@ -675,6 +739,16 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
     action = snap["action"]
     domain = snap.get("domain", "expense")
 
+    if domain == "memory":
+        # Memory undo is simpler than the other domains -- always a
+        # delete-then-restore by label, never a date edit -- so it gets its
+        # own branch instead of forcing it into the expense_id-shaped
+        # _DOMAIN_OPS registry.
+        if action == "delete":
+            restored = db.restore_deleted_memory(chat_id, snap["row"])
+            await _reply(update, chat_id, f"Restored: {_memory_line(restored)}")
+        return True
+
     if domain in _DOMAIN_OPS:
         # meal/workout/vitals all share the same narrow revert shape -- see
         # _handle_simple_domain_correction for why their correction surface
@@ -682,39 +756,34 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
         ops = _DOMAIN_OPS[domain]
         if action == "delete":
             restored = ops["restore"](chat_id, snap["row"])
-            await update.message.reply_text(f"Restored: {ops['line'](restored)}")
+            await _reply(update, chat_id, f"Restored: {ops['line'](restored)}")
         elif action == "edit_date":
             row = ops["edit_date"](chat_id, snap["expense_id"], snap["old_date"])
-            await update.message.reply_text(
-                f"Reverted -- {ops['noun']} is back to {row[ops['date_field']]}."
-            )
+            await _reply(update, chat_id, f"Reverted -- {ops['noun']} is back to {row[ops['date_field']]}.")
         return True
 
     if action == "delete":
         restored = db.restore_deleted_expense(chat_id, snap["row"])
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Restored: {_money(restored['amount'], restored['currency'])} -- {restored['description']} "
             f"[{restored['category']}] ({restored['expense_date']})"
         )
     elif action == "edit_date":
         row = db.edit_expense_date(chat_id, snap["expense_id"], snap["old_date"])
-        await update.message.reply_text(f"Reverted -- date is back to {row['expense_date']}.")
+        await _reply(update, chat_id, f"Reverted -- date is back to {row['expense_date']}.")
     elif action == "edit_currency":
         row = db.edit_expense(chat_id, snap["expense_id"], new_currency=snap["old_currency"])
-        await update.message.reply_text(
-            f"Reverted -- currency is back to {_money(row['amount'], row['currency'])}."
-        )
+        await _reply(update, chat_id, f"Reverted -- currency is back to {_money(row['amount'], row['currency'])}.")
     elif action == "edit_amount":
         row = db.edit_expense(chat_id, snap["expense_id"], new_amount=snap["old_amount"])
-        await update.message.reply_text(
-            f"Reverted -- amount is back to {_money(row['amount'], row['currency'])}."
-        )
+        await _reply(update, chat_id, f"Reverted -- amount is back to {_money(row['amount'], row['currency'])}.")
     elif action == "edit_description":
         row = db.edit_expense(chat_id, snap["expense_id"], new_description=snap["old_description"])
-        await update.message.reply_text(f"Reverted -- description is back to \"{row['description']}\".")
+        await _reply(update, chat_id, f"Reverted -- description is back to \"{row['description']}\".")
     elif action == "edit_category":
         row = db.edit_expense(chat_id, snap["expense_id"], new_category=snap["old_category"])
-        await update.message.reply_text(f"Reverted -- category is back to [{row['category']}].")
+        await _reply(update, chat_id, f"Reverted -- category is back to [{row['category']}].")
     return True
 
 
@@ -749,7 +818,8 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
     noun, recent_cmd = ops["noun"], ops["recent_cmd"]
 
     if target_id not in recent_ids or action not in SIMPLE_DOMAIN_ACTIONS:
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"I'm not sure which {noun} you mean, or that kind of edit isn't supported yet for "
             f"{noun}s -- only moving the date or deleting one is. Run {recent_cmd} to see recent entries."
         )
@@ -757,13 +827,14 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
 
     row = ops["get"](chat_id, target_id)
     if row is None:
-        await update.message.reply_text(f"Couldn't find that {noun} anymore -- run {recent_cmd} to check.")
+        await _reply(update, chat_id, f"Couldn't find that {noun} anymore -- run {recent_cmd} to check.")
         return
 
     if action == "edit_date":
         days_ago = parsed.get("days_ago")
         if not isinstance(days_ago, int) or not (0 <= days_ago <= 14):
-            await update.message.reply_text(
+            await _reply(
+                update, chat_id,
                 f"Which day did you mean for that {noun}? (e.g. today, yesterday, or '3 days ago')"
             )
             return
@@ -774,7 +845,8 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
         context.chat_data[LAST_CORRECTION_KEY] = {
             "domain": domain, "action": "edit_date", "expense_id": target_id, "old_date": old_date,
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- that {noun} is now dated {updated[ops['date_field']]} (was {old_date}). "
             "Reply 'undo' if that's wrong."
         )
@@ -783,7 +855,7 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
     if action == "delete":
         deleted = ops["delete"](chat_id, target_id)
         context.chat_data[LAST_CORRECTION_KEY] = {"domain": domain, "action": "delete", "row": deleted}
-        await update.message.reply_text(f"Deleted: {ops['line'](deleted)}. Reply 'undo' if that's wrong.")
+        await _reply(update, chat_id, f"Deleted: {ops['line'](deleted)}. Reply 'undo' if that's wrong.")
         return
 
 
@@ -812,20 +884,22 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if target_id not in recent_ids or action not in CORRECTION_ACTIONS:
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             "I'm not sure which expense you mean -- run /recent to see IDs, then use /edit <id> or /delete <id>."
         )
         return
 
     row = db.get_expense(chat_id, target_id)
     if row is None:
-        await update.message.reply_text("Couldn't find that expense anymore -- run /recent to check.")
+        await _reply(update, chat_id, "Couldn't find that expense anymore -- run /recent to check.")
         return
 
     if action == "edit_date":
         days_ago = parsed.get("days_ago")
         if not isinstance(days_ago, int) or not (0 <= days_ago <= 14):
-            await update.message.reply_text(
+            await _reply(
+                update, chat_id,
                 f"Which day did you mean for {_money(row['amount'], row['currency'])} -- "
                 f"{row['description']}? (e.g. today, yesterday, or '3 days ago')"
             )
@@ -837,7 +911,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.chat_data[LAST_CORRECTION_KEY] = {
             "action": "edit_date", "expense_id": target_id, "old_date": old_date,
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- {_money(updated['amount'], updated['currency'])} \"{updated['description']}\" is "
             f"now dated {updated['expense_date']} (was {old_date}). Reply 'undo' if that's wrong."
         )
@@ -846,7 +921,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "edit_currency":
         new_currency = fx.normalize_currency(parsed.get("new_currency"))
         if not new_currency:
-            await update.message.reply_text(
+            await _reply(
+                update, chat_id,
                 f"What currency should {_money(row['amount'], row['currency'])} -- "
                 f"{row['description']} actually be?"
             )
@@ -857,7 +933,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.chat_data[LAST_CORRECTION_KEY] = {
             "action": "edit_currency", "expense_id": target_id, "old_currency": old_currency,
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- \"{updated['description']}\" is now {_money(updated['amount'], updated['currency'])} "
             f"(was {old_display}). Reply 'undo' if that's wrong."
         )
@@ -866,14 +943,15 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "edit_amount":
         new_amount = parsed.get("new_amount")
         if not isinstance(new_amount, (int, float)) or new_amount <= 0:
-            await update.message.reply_text(f"What should the amount for \"{row['description']}\" actually be?")
+            await _reply(update, chat_id, f"What should the amount for \"{row['description']}\" actually be?")
             return
         old_display = _money(row["amount"], row["currency"])
         updated = db.edit_expense(chat_id, target_id, new_amount=float(new_amount))
         context.chat_data[LAST_CORRECTION_KEY] = {
             "action": "edit_amount", "expense_id": target_id, "old_amount": row["amount"],
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- \"{updated['description']}\" is now {_money(updated['amount'], updated['currency'])} "
             f"(was {old_display}). Reply 'undo' if that's wrong."
         )
@@ -882,14 +960,15 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "edit_description":
         new_description = parsed.get("new_description")
         if not new_description:
-            await update.message.reply_text("What should the description say instead?")
+            await _reply(update, chat_id, "What should the description say instead?")
             return
         old_description = row["description"]
         updated = db.edit_expense(chat_id, target_id, new_description=new_description)
         context.chat_data[LAST_CORRECTION_KEY] = {
             "action": "edit_description", "expense_id": target_id, "old_description": old_description,
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- description is now \"{updated['description']}\" (was \"{old_description}\"). "
             "Reply 'undo' if that's wrong."
         )
@@ -898,7 +977,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "edit_category":
         new_category = parsed.get("new_category")
         if new_category not in config.CATEGORIES:
-            await update.message.reply_text(
+            await _reply(
+                update, chat_id,
                 f"What category should \"{row['description']}\" actually be? "
                 f"({', '.join(config.CATEGORIES)})"
             )
@@ -908,7 +988,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.chat_data[LAST_CORRECTION_KEY] = {
             "action": "edit_category", "expense_id": target_id, "old_category": old_category,
         }
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Updated -- \"{updated['description']}\" is now [{updated['category']}] (was [{old_category}]). "
             "Reply 'undo' if that's wrong."
         )
@@ -917,7 +998,8 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "delete":
         deleted = db.delete_expense(chat_id, target_id)
         context.chat_data[LAST_CORRECTION_KEY] = {"action": "delete", "row": deleted}
-        await update.message.reply_text(
+        await _reply(
+            update, chat_id,
             f"Deleted: {_money(deleted['amount'], deleted['currency'])} -- {deleted['description']} "
             f"[{deleted['category']}] ({deleted['expense_date']}). Reply 'undo' if that's wrong."
         )
@@ -930,6 +1012,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
     pending = context.chat_data.get(PENDING_KEY)
+    db.add_message(chat_id, "user", text)
 
     # Only treat a bare "no"/"wrong"/"undo" as reverting a correction when
     # we're not mid-clarification -- otherwise it's very likely a genuine
@@ -951,14 +1034,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_workout_ids = {r["id"] for r in recent_workouts}
     recent_vitals = _recent_vitals_for_ai(chat_id)
     recent_vitals_ids = {r["id"] for r in recent_vitals}
+    # The message just added above is deliberately included here -- the
+    # model should see its own current turn as part of the running thread,
+    # not just what came before it.
+    recent_messages = _recent_messages_for_ai(chat_id)
+    memory_list = _memory_for_ai(chat_id)
 
     if pending:
         # We asked a clarifying question; treat this message as the answer.
         merged_text = f"{pending['original']}\n(Additional info: {text})"
-        parsed = ai.parse_message(merged_text, recent_expenses, recent_meals, recent_workouts, recent_vitals)
+        parsed = ai.parse_message(merged_text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
+                                   recent_messages, memory_list)
     else:
         merged_text = text
-        parsed = ai.parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals)
+        parsed = ai.parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
+                                   recent_messages, memory_list)
 
     intent = parsed.get("intent")
 
@@ -969,7 +1059,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # messages ago), which was a real bug: the context would shrink with
         # every back-and-forth instead of growing.
         context.chat_data[PENDING_KEY] = {"original": merged_text}
-        await update.message.reply_text(parsed.get("clarification_question") or "Could you clarify that?")
+        await _reply(update, chat_id, parsed.get("clarification_question") or "Could you clarify that?")
         return
 
     if intent == "correction":
@@ -982,12 +1072,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Answered directly with real numbers -- the exact same code path as
         # /balance -- rather than just telling the user to go type /balance.
         context.chat_data.pop(PENDING_KEY, None)
-        await update.message.reply_text(_balance_text(chat_id))
+        await _reply(update, chat_id, _balance_text(chat_id))
         return
 
     if intent == "show_recent":
         context.chat_data.pop(PENDING_KEY, None)
-        await update.message.reply_text(_recent_text(chat_id))
+        await _reply(update, chat_id, _recent_text(chat_id))
         return
 
     if intent == "log_meal":
@@ -1000,12 +1090,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         workout_id = db.add_workout(chat_id, parsed.get("activity"), parsed.get("duration_min"),
                                      parsed.get("distance_km"), parsed.get("workout_notes"))
         row = db.get_workout(chat_id, workout_id)
-        await update.message.reply_text(f"Logged: {_workout_line(row)}")
+        await _reply(update, chat_id, f"Logged: {_workout_line(row)}")
         return
 
     if intent == "log_vitals":
         context.chat_data.pop(PENDING_KEY, None)
         await _log_vitals_and_reply(update, chat_id, parsed)
+        return
+
+    if intent == "remember":
+        context.chat_data.pop(PENDING_KEY, None)
+        label = parsed.get("memory_label")
+        content = parsed.get("memory_content")
+        if not label or not content:
+            await _reply(update, chat_id, "What should I remember, and what should I call it?")
+            return
+        db.set_memory(chat_id, label, content, parsed.get("memory_category"))
+        await _reply(update, chat_id, f"Got it -- I'll remember \"{label}\": {content}")
+        return
+
+    if intent == "forget":
+        context.chat_data.pop(PENDING_KEY, None)
+        label = parsed.get("memory_label")
+        deleted = db.delete_memory_by_label(chat_id, label) if label else None
+        if not deleted:
+            await _reply(update, chat_id, "I couldn't find that in what I remember -- run /memory to see the list.")
+            return
+        context.chat_data[LAST_CORRECTION_KEY] = {"domain": "memory", "action": "delete", "row": deleted}
+        await _reply(update, chat_id, f"Forgot \"{deleted['label']}\". Reply 'undo' if that's wrong.")
+        return
+
+    if intent == "show_memory":
+        # Same discipline as show_balance/show_recent -- the real saved
+        # list, not the model's best guess at what it remembers.
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(update, chat_id, _memory_text(chat_id))
         return
 
     if intent != "log_expense":
@@ -1016,7 +1135,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Not sure what to do with that. Use /log, /claim, /logmeal, /logworkout, /logvitals, /balance, "
             "/summary, /recent, or /help."
         )
-        await update.message.reply_text(reply)
+        await _reply(update, chat_id, reply)
         return
 
     context.chat_data.pop(PENDING_KEY, None)
@@ -1024,7 +1143,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = parsed.get("expenses") or []
     items = [it for it in items if it.get("amount") is not None]
     if not items:
-        await update.message.reply_text("I still didn't catch an amount -- try e.g. 'spent 12 on lunch'.")
+        await _reply(update, chat_id, "I still didn't catch an amount -- try e.g. 'spent 12 on lunch'.")
         return
 
     logged_lines = []
@@ -1043,7 +1162,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = db.get_status(chat_id)
     header = "Logged:" if len(logged_lines) == 1 else f"Logged {len(logged_lines)} expenses:"
     body = "\n".join(logged_lines) if len(logged_lines) == 1 else "\n".join(f"- {l}" for l in logged_lines)
-    await update.message.reply_text(f"{header}\n{body}\n\n{_status_text(status)}")
+    await _reply(update, chat_id, f"{header}\n{body}\n\n{_status_text(status)}")
     if any_personal:
         await _send_alert_if_needed(update, chat_id)
 
@@ -1112,6 +1231,8 @@ def main():
     app.add_handler(CommandHandler("recentworkouts", recentworkouts))
     app.add_handler(CommandHandler("logvitals", logvitals_cmd))
     app.add_handler(CommandHandler("recentvitals", recentvitals))
+    app.add_handler(CommandHandler("memory", memory_cmd))
+    app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(on_error)

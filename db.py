@@ -26,6 +26,17 @@ Design (see README for the full explanation):
   subset -- all nullable, since not every check-in reports everything).
   Separate from `workouts` because it's reported on its own cadence, not
   tied to a specific session.
+- `messages`: a rolling log of the conversation itself (both sides), so
+  Morrow can stay in a multi-turn thread instead of only seeing structured
+  log rows. Read as the last ~30 turns on every call -- this is short-term
+  memory (the current conversation), not long-term.
+- `memory`: durable, labeled facts that outlast any one conversation --
+  goals, standing plans, preferences. One row per `label` per chat (a
+  case-insensitive match on an existing label updates that row in place
+  rather than creating a near-duplicate), so "remember" always edits the
+  same named slot instead of piling up copies. This is what answers "pull
+  up my workout plan" -- unlike `messages`, it's meant to be read in full on
+  every call, not just recently.
 
 Rollover math (matches the spec exactly):
   Day 1: target=$100, spend $30 -> leftover = $100 - $30 = $70 -> balance += 70
@@ -123,6 +134,25 @@ def init_db():
                 notes TEXT,
                 vitals_date TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                category TEXT,
+                content TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
         # Forward-compatible migration in case this is an existing db from
@@ -770,3 +800,95 @@ def restore_deleted_vitals(chat_id, row):
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_vitals(chat_id, new_id)
+
+
+# ---------- rolling conversation history ----------
+
+def add_message(chat_id, role, content):
+    """role is 'user' or 'morrow'. No upper bound on table growth yet --
+    a personal chat's text is small enough that this isn't worth trimming
+    until it's actually a problem."""
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)",
+            (chat_id, role, content),
+        )
+
+
+def get_recent_messages(chat_id, limit=30):
+    """Returns the last `limit` turns in chronological order (oldest first)
+    -- ready to drop straight into a prompt as conversation history, unlike
+    get_recent_* elsewhere which return newest-first for display."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+
+# ---------- durable memory ----------
+
+def set_memory(chat_id, label, content, category=None):
+    """Upsert by (chat_id, label), case-insensitive -- 'remember the biopolis
+    plan' twice edits the same row instead of creating a near-duplicate.
+    Returns the memory id."""
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM memory WHERE chat_id = ? AND label = ? COLLATE NOCASE",
+            (chat_id, label),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE memory SET content = ?, category = COALESCE(?, category), "
+                "updated_at = datetime('now') WHERE id = ?",
+                (content, category, existing["id"]),
+            )
+            return existing["id"]
+        conn.execute(
+            "INSERT INTO memory (chat_id, label, category, content) VALUES (?, ?, ?, ?)",
+            (chat_id, label, category, content),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_memory_list(chat_id, limit=40):
+    """Most-recently-updated first -- meant to be read in full into every
+    prompt (see the messages module docstring), so this is capped the same
+    way get_recent_meals etc. are, not because it's a display list."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM memory WHERE chat_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_memory_by_label(chat_id, label):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM memory WHERE chat_id = ? AND label = ? COLLATE NOCASE",
+            (chat_id, label),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def delete_memory_by_label(chat_id, label):
+    row = get_memory_by_label(chat_id, label)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM memory WHERE id = ? AND chat_id = ?", (row["id"], chat_id))
+    return row
+
+
+def restore_deleted_memory(chat_id, row):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO memory (chat_id, label, category, content, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, row["label"], row["category"], row["content"], row["updated_at"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_memory_by_label(chat_id, row["label"]) if new_id else None

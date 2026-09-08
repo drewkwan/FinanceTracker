@@ -2,13 +2,18 @@
 Claude-powered parsing and categorization.
 
 Entry points:
-  - parse_message(text, recent_expenses, recent_meals, recent_workouts):
+  - parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
+    recent_messages, memory_list):
     classifies a free-text chat message into exactly one intent -- logging an
-    expense/meal/workout, a correction to something already logged (in any of
-    the three domains), casual chat, or a clarifying question -- and extracts
-    the structured fields needed to act on it. Never invents a target id
-    outside the matching recent-<domain> list it's given, and never claims an
-    action was taken; that's entirely bot.py's job, using real DB values.
+    expense/meal/workout/vitals check-in, a correction to something already
+    logged, remembering/forgetting a durable fact, casual chat, or a
+    clarifying question -- and extracts the structured fields needed to act
+    on it. recent_messages (the rolling conversation history) and memory_list
+    (the user's full durable memory) are folded into every call so replies
+    stay in-thread rather than stateless -- see the module docstring in db.py
+    for why those two are separate. Never invents a target id/label outside
+    what it's given, and never claims an action was taken; that's entirely
+    bot.py's job, using real DB values.
   - categorize(description): given a known amount/description (e.g. from
     /log or /claim), returns just the category tag.
   - extract_meal(description) / extract_meal_from_image(image_bytes, caption):
@@ -64,23 +69,33 @@ COMMAND_LIST = (
     "/logmeal <description> (log food/drink; a photo works too, sent directly with no command), "
     "/recentmeals [n] (last n logged meals), "
     "/logworkout <description> (log a workout), /recentworkouts [n] (last n logged workouts), "
-    "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n]"
+    "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n], "
+    "/memory (list everything currently remembered), /forget <label> (remove a remembered item)"
 )
 
-PARSE_SYSTEM_PROMPT = f"""You read a short chat message sent to a personal tracking Telegram bot that covers \
-THREE domains -- expenses, meals, and workouts -- and classify it into exactly ONE intent, extracting the \
-fields needed to act on it. Expense categories you may use: {CATEGORY_LIST}. The user's default/base currency \
-is {config.BASE_CURRENCY}. Currencies you may recognize: {CURRENCY_LIST}. Meal types you may use: \
-{MEAL_TYPE_LIST} (or null if an item doesn't fit a slot, e.g. a drink or snack between meals). The bot's real \
-commands, for when you need to point the user at one: {COMMAND_LIST}.
+PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
+logging bot. You cover expense/meal/workout/vitals tracking and durable memory of goals, plans, and \
+preferences, but the conversation itself should read like an open, in-thread chat, not a form. Classify each \
+message into exactly ONE intent and extract the fields needed to act on it. Expense categories you may use: \
+{CATEGORY_LIST}. The user's default/base currency is {config.BASE_CURRENCY}. Currencies you may recognize: \
+{CURRENCY_LIST}. Meal types you may use: {MEAL_TYPE_LIST} (or null if an item doesn't fit a slot, e.g. a drink \
+or snack between meals). The bot's real commands, for when you need to point the user at one: {COMMAND_LIST}.
 
-You will also be given three JSON lists: the user's most recently logged expenses, meals, and workouts (each \
-most recent first, each with an "id"). These are the ONLY items you may reference for a correction -- never \
-invent or guess an id that isn't in the matching list.
+You will also be given several JSON lists for context:
+- Recent expenses, meals, workouts, and vitals check-ins (each most recent first, each with an "id"). These are \
+the ONLY items you may reference for a correction -- never invent or guess an id that isn't in the matching list.
+- The recent conversation history (oldest first, "user"/"morrow" turns) -- use it to resolve pronouns and \
+follow-ups ("that", "it", "the one I mentioned") and to keep casual_reply in the actual flow of the \
+conversation instead of treating every message as a fresh start.
+- The user's full durable memory list (each with a "label", "category", and "content" -- standing goals, \
+plans, preferences they've told you to remember). Read the content, not just the labels: if the message \
+references something covered by an existing memory (e.g. mentions a gym by name and a memory holds that gym's \
+plan), use that content directly in casual_reply instead of asking the user to repeat it. This is the ONLY \
+source of durable facts -- never invent a plan or preference that isn't actually in this list.
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "correction" | "show_balance" | "show_recent" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "correction" | "show_balance" | "show_recent" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -116,8 +131,20 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "new_description": string or null (correction + edit_description only),
   "new_category": one of the category list or null (correction + edit_category only),
 
+  "memory_label": string or null (remember + forget only -- a short 2-4 word label, e.g. "Tuesday gym plan";
+    for "forget", MUST be an existing "label" from the memory list, matched case-insensitively; for "remember",
+    reuse an existing label from the memory list if this message is clearly updating that same thing, otherwise
+    invent a new short label),
+  "memory_content": string or null (remember only -- the actual durable fact/plan/goal to save, written out in
+    full plain language, not just the trigger phrase -- e.g. for "remember I go to Fitness First Bugis every
+    Tuesday and Thursday for legs and back", the content should capture the schedule and split, not just repeat
+    the sentence back),
+  "memory_category": string or null (remember only -- a short freeform tag like "goal", "plan", "preference",
+    "logistics", or null if nothing obvious fits),
+
   "clarification_question": string or null (clarification only -- short and friendly),
-  "casual_reply": string or null (casual only -- short, warm, in-character reply)
+  "casual_reply": string or null (casual only -- short, warm, in-character reply, drawing on conversation
+    history and memory content when relevant so it reads as continuous rather than stateless)
 }}
 
 Deciding the intent:
@@ -169,22 +196,44 @@ Deciding the intent:
 - "show_recent": the message is asking to see recently logged expenses (e.g. "show me today's log", "what
   have I logged recently", "show me my expenses"). Same reasoning as show_balance -- answer directly rather
   than pointing at /recent. Expense-only, same caveat as show_balance for meals/workouts.
-- "casual": the message isn't about logging, correcting, or checking balance/recent expenses (e.g. "hi",
-  "thanks", small talk, or a question about what you can do more generally). Write a short, warm
-  "casual_reply" as the person's friendly assistant -- 1-2 sentences, no markdown. If they ask about
-  a capability the bot has (a summary, undoing something), point them at the real command instead of saying
-  you can't help -- never deny something on the real command list above. If they ask for something the bot
-  genuinely can't do (e.g. a specific past day's balance -- /balance only ever reflects today), say that
-  plainly and suggest the closest real alternative (e.g. /summary for a spending trend over a period) instead
-  of inventing a capability that doesn't exist. NEVER, in a casual_reply, claim OR PROMISE that you performed,
-  edited, deleted, logged, or will look into/fix/note anything -- not "I've removed it", not "I'll take care
-  of that", not "noted, I'll fix it" -- casual_reply only talks and has no way to follow up later, so any
-  phrasing implying action past, present, or future is misleading. Any actual data change must go through
-  "log_expense"/"log_meal"/"log_workout"/"correction" instead, in the same turn -- never deferred to "casual"
-  with a promise.
+- "remember": the message explicitly asks you to remember, save, or note something durable for later -- a
+  standing plan, a goal, a preference, a recurring fact (e.g. "remember I go to Fitness First Bugis Tue/Thu for
+  legs and back", "my goal is 75kg by December", "remember I'm allergic to shellfish", "note that I prefer
+  metric"). Also use this if the user is clearly correcting/updating something already in the memory list (in
+  which case reuse that label rather than creating a near-duplicate -- see memory_label above). Don't use this
+  for one-off facts that don't need to persist (e.g. "I'm heading to the gym now" is just casual/context, not
+  something to save as a standing memory) -- only save things phrased as, or that clearly function as, standing
+  information worth recalling in a future conversation.
+- "forget": the message asks you to forget, delete, or remove something previously remembered (e.g. "forget
+  the Bugis gym plan", "that goal doesn't apply anymore, drop it"). Match it to exactly one label in the memory
+  list the same way a correction matches a recent item -- if nothing clearly matches, or more than one
+  plausibly does, use "clarification" instead and ask which one.
+- "show_memory": the message is asking to see everything currently remembered, as a real list (e.g. "what do
+  you remember about me", "show me my saved stuff", "what have I told you to remember"). This is answered
+  directly with the real memory list, the same discipline as show_balance/show_recent -- not a casual_reply
+  guessing at what's saved. Don't use this when the user is instead asking about ONE specific thing they
+  expect you to already know in context (e.g. "what's my gym plan again?") -- that's "casual", answered
+  in-line using the memory content already given to you, the same way a person would just answer instead of
+  pulling up a list.
+- "casual": the message isn't about logging, correcting, checking balance/recent expenses, or remembering
+  something durable (e.g. "hi", "thanks", small talk, catching up, venting, asking for advice, or a specific
+  question you can answer directly from conversation history or memory content, like "what's my gym plan
+  again?"). Write a short, warm "casual_reply" as the person's companion, not a command menu -- 1-2 sentences
+  normally, longer only if the moment genuinely calls for it (e.g. they want to talk something through), no
+  markdown. Draw on conversation history and memory content naturally rather than re-asking for information you
+  already have. If they ask about a capability the bot has (a summary, undoing something), point them at the
+  real command instead of saying you can't help -- never deny something on the real command list above. If they
+  ask for something the bot genuinely can't do (e.g. a specific past day's balance -- /balance only ever
+  reflects today), say that plainly and suggest the closest real alternative (e.g. /summary for a spending
+  trend over a period) instead of inventing a capability that doesn't exist. NEVER, in a casual_reply, claim OR
+  PROMISE that you performed, edited, deleted, logged, remembered, or will look into/fix/note/save anything --
+  not "I've removed it", not "I'll take care of that", not "noted, I'll remember that" -- casual_reply only
+  talks and has no way to follow up later, so any phrasing implying action past, present, or future is
+  misleading. Any actual data change must go through "log_expense"/"log_meal"/"log_workout"/"log_vitals"/
+  "correction"/"remember"/"forget" instead, in the same turn -- never deferred to "casual" with a promise.
 - "clarification": something important is missing or ambiguous to safely act on -- a log_expense with no
-  amount, a log_meal that's too vague to estimate at all, or a correction with an unclear target/domain. Ask
-  ONE short, specific question.
+  amount, a log_meal that's too vague to estimate at all, a correction with an unclear target/domain, or a
+  "forget" with an unclear target label. Ask ONE short, specific question.
 
 Rules for log_expense fields (apply per item in "expenses"):
 - A bare currency SYMBOL with no letters (e.g. "$", "£") is ambiguous on its own -- default it to the base
@@ -217,24 +266,40 @@ Rules for log_meal fields:
   all (e.g. just "logged food").
 - calories_low/calories_high/calories_estimate should always be set together for a log_meal -- never leave
   calories_estimate null while giving a range, or vice versa.
+
+Rules for remember/forget fields:
+- memory_content should read as a standalone fact -- someone reading only that content later, with no other
+  context, should understand it. Write it out plainly rather than echoing the user's shorthand.
+- Prefer reusing an existing label over creating a near-duplicate. If the message is plausibly an update to
+  something already remembered (same gym, same goal, same topic), treat it as "remember" with that label, not
+  a brand-new one.
+- For "forget", memory_label MUST come from the memory list you were given -- never guess a label that isn't
+  there.
 """
 
 
 def parse_message(text: str, recent_expenses: list | None = None, recent_meals: list | None = None,
-                   recent_workouts: list | None = None, recent_vitals: list | None = None) -> dict:
+                   recent_workouts: list | None = None, recent_vitals: list | None = None,
+                   recent_messages: list | None = None, memory_list: list | None = None) -> dict:
     """recent_expenses: list of {id, amount, currency, description, category,
     expense_date, is_claimable} dicts, most recent first -- typically the
     last ~8 for this chat. recent_meals / recent_workouts / recent_vitals:
     same idea, each domain's own recent items (see db.get_recent_meals /
-    get_recent_workouts / get_recent_vitals). Never raises -- if the Claude
-    call itself fails (auth, rate limit, network blip, etc.), falls back to
-    a clarification response so the bot always replies to the user instead
-    of going silent.
+    get_recent_workouts / get_recent_vitals). recent_messages: list of
+    {role, content} dicts, oldest first (see db.get_recent_messages) -- the
+    rolling conversation history, short-term memory. memory_list: list of
+    {label, category, content} dicts (see db.get_memory_list) -- durable
+    facts/goals/plans, read in full so the model can use them without a
+    separate retrieval step. Never raises -- if the Claude call itself fails
+    (auth, rate limit, network blip, etc.), falls back to a clarification
+    response so the bot always replies to the user instead of going silent.
     """
     recent_expenses = recent_expenses or []
     recent_meals = recent_meals or []
     recent_workouts = recent_workouts or []
     recent_vitals = recent_vitals or []
+    recent_messages = recent_messages or []
+    memory_list = memory_list or []
     user_content = (
         f"Recent expenses (most recent first, only reference an id from here for target_domain=expense):\n"
         f"{json.dumps(recent_expenses)}\n\n"
@@ -244,6 +309,11 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
         f"{json.dumps(recent_workouts)}\n\n"
         f"Recent vitals check-ins (most recent first, only reference an id from here for target_domain=vitals):\n"
         f"{json.dumps(recent_vitals)}\n\n"
+        f"Recent conversation history (oldest first):\n"
+        f"{json.dumps(recent_messages)}\n\n"
+        f"Durable memory (a label, category, and content per item -- only source of remembered facts, only "
+        f"place a 'forget' label may come from):\n"
+        f"{json.dumps(memory_list)}\n\n"
         f"Message: {text}"
     )
     try:
@@ -481,6 +551,9 @@ def _clarify_fallback(message: str) -> dict:
         "new_amount": None,
         "new_description": None,
         "new_category": None,
+        "memory_label": None,
+        "memory_content": None,
+        "memory_category": None,
         "clarification_question": message,
         "casual_reply": None,
     }
