@@ -51,6 +51,7 @@ Rollover math (matches the spec exactly):
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import date, timedelta
 from contextlib import contextmanager
 
@@ -59,7 +60,7 @@ import fx
 
 
 @contextmanager
-def get_conn():
+def get_conn() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -70,13 +71,13 @@ def get_conn():
         conn.close()
 
 
-def _add_column_if_missing(conn, table, column, ddl):
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
     cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
-def init_db():
+def init_db() -> None:
     with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -183,17 +184,17 @@ def init_db():
         conn.execute("UPDATE expenses SET amount_base = amount WHERE amount_base IS NULL")
 
 
-def _now_local_date():
+def _now_local_date() -> date:
     from datetime import datetime
     from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo(config.BOT_TIMEZONE)).date()
 
 
-def today_str():
+def today_str() -> str:
     return _now_local_date().isoformat()
 
 
-def get_or_create_user(chat_id):
+def get_or_create_user(chat_id: int) -> dict:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         if row is None:
@@ -205,13 +206,13 @@ def get_or_create_user(chat_id):
         return dict(row)
 
 
-def set_daily_target(chat_id, amount):
+def set_daily_target(chat_id: int, amount: float) -> None:
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute("UPDATE users SET daily_target = ? WHERE chat_id = ?", (amount, chat_id))
 
 
-def _spent_on(conn, chat_id, day_str):
+def _spent_on(conn: sqlite3.Connection, chat_id: int, day_str: str) -> float:
     row = conn.execute(
         "SELECT COALESCE(SUM(amount_base), 0) AS total FROM expenses "
         "WHERE chat_id = ? AND expense_date = ? AND is_claimable = 0",
@@ -220,7 +221,7 @@ def _spent_on(conn, chat_id, day_str):
     return row["total"]
 
 
-def ensure_rollover(chat_id):
+def ensure_rollover(chat_id: int) -> dict:
     """
     Catches the user's balance (and streak) up to today. Safe to call before
     every command. If the bot was offline for multiple days, rolls forward
@@ -266,7 +267,7 @@ def ensure_rollover(chat_id):
     return result
 
 
-def get_status(chat_id):
+def get_status(chat_id: int) -> dict:
     ensure_rollover(chat_id)
     user = get_or_create_user(chat_id)
     today = today_str()
@@ -289,7 +290,7 @@ def get_status(chat_id):
     }
 
 
-def maybe_alert(chat_id):
+def maybe_alert(chat_id: int) -> bool:
     """Returns True (and marks it sent) the first time today that spending
     crosses config.BUDGET_ALERT_THRESHOLD of today's available budget."""
     status = get_status(chat_id)
@@ -308,7 +309,8 @@ def maybe_alert(chat_id):
     return False
 
 
-def add_expense(chat_id, amount, currency, description, category, is_claimable=False):
+def add_expense(chat_id: int, amount: float, currency: str, description: str, category: str,
+                 is_claimable: bool = False) -> int:
     ensure_rollover(chat_id)
     get_or_create_user(chat_id)
     currency = (currency or config.BASE_CURRENCY).upper()
@@ -322,7 +324,7 @@ def add_expense(chat_id, amount, currency, description, category, is_claimable=F
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def clear_claimables(chat_id):
+def clear_claimables(chat_id: int) -> tuple[int, float]:
     """Marks all pending claimables as claimed. Returns (count, total_base)."""
     with get_conn() as conn:
         rows = conn.execute(
@@ -337,7 +339,7 @@ def clear_claimables(chat_id):
         return rows["n"], rows["total"]
 
 
-def get_pending_claimables(chat_id):
+def get_pending_claimables(chat_id: int) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, amount, currency, description, category, expense_date FROM expenses "
@@ -347,7 +349,7 @@ def get_pending_claimables(chat_id):
         return [dict(r) for r in rows]
 
 
-def get_recent_expenses(chat_id, limit=10):
+def get_recent_expenses(chat_id: int, limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, amount, currency, description, category, is_claimable, is_claimed, expense_date "
@@ -357,7 +359,7 @@ def get_recent_expenses(chat_id, limit=10):
         return [dict(r) for r in rows]
 
 
-def get_expense(chat_id, expense_id):
+def get_expense(chat_id: int, expense_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM expenses WHERE id = ? AND chat_id = ?", (expense_id, chat_id)
@@ -365,14 +367,14 @@ def get_expense(chat_id, expense_id):
         return dict(row) if row else None
 
 
-def _adjust_balance_for_past_day(conn, chat_id, delta_base):
+def _adjust_balance_for_past_day(conn: sqlite3.Connection, chat_id: int, delta_base: float) -> None:
     """delta_base > 0 means less was spent than before (refund to balance)."""
     if delta_base == 0:
         return
     conn.execute("UPDATE users SET balance = balance + ? WHERE chat_id = ?", (delta_base, chat_id))
 
 
-def delete_expense(chat_id, expense_id):
+def delete_expense(chat_id: int, expense_id: int) -> dict | None:
     """Deletes an expense. If it was a past (already rolled-over) non-claimable
     day, credits the balance back so history stays consistent. Returns the
     deleted row as a dict, or None if it didn't exist / wasn't this chat's."""
@@ -387,7 +389,7 @@ def delete_expense(chat_id, expense_id):
     return row
 
 
-def delete_most_recent(chat_id):
+def delete_most_recent(chat_id: int) -> dict | None:
     """Undo: deletes the single most recent expense for this chat."""
     recent = get_recent_expenses(chat_id, limit=1)
     if not recent:
@@ -395,7 +397,7 @@ def delete_most_recent(chat_id):
     return delete_expense(chat_id, recent[0]["id"])
 
 
-def restore_deleted_expense(chat_id, row):
+def restore_deleted_expense(chat_id: int, row: dict) -> dict | None:
     """Re-inserts a previously deleted expense row exactly as it was (same
     amount/currency/amount_base/description/category/claimable-ness/date),
     applying the exact opposite balance adjustment delete_expense would have
@@ -416,8 +418,9 @@ def restore_deleted_expense(chat_id, row):
     return get_expense(chat_id, new_id)
 
 
-def edit_expense(chat_id, expense_id, new_amount=None, new_currency=None,
-                  new_description=None, new_category=None):
+def edit_expense(chat_id: int, expense_id: int, new_amount: float | None = None,
+                  new_currency: str | None = None, new_description: str | None = None,
+                  new_category: str | None = None) -> dict | None:
     """Updates an expense in place. Only touches fields that are passed in.
     Recomputes amount_base if amount or currency changed, and (for
     non-claimable expenses on already-rolled-over days) adjusts the running
@@ -449,7 +452,7 @@ def edit_expense(chat_id, expense_id, new_amount=None, new_currency=None,
     return get_expense(chat_id, expense_id)
 
 
-def edit_expense_date(chat_id, expense_id, new_date_str):
+def edit_expense_date(chat_id: int, expense_id: int, new_date_str: str) -> dict | None:
     """Moves a non-claimable expense to a different expense_date, adjusting
     the running balance so history stays consistent. new_date_str is an ISO
     date string; dates after today are clamped to today (this app doesn't
@@ -509,13 +512,13 @@ def edit_expense_date(chat_id, expense_id, new_date_str):
     return get_expense(chat_id, expense_id)
 
 
-def get_all_chat_ids():
+def get_all_chat_ids() -> list[int]:
     with get_conn() as conn:
         rows = conn.execute("SELECT chat_id FROM users").fetchall()
         return [r["chat_id"] for r in rows]
 
 
-def get_category_totals(chat_id, start_date, end_date):
+def get_category_totals(chat_id: int, start_date: str, end_date: str) -> list[dict]:
     """Category breakdown (in base currency) of non-claimable spending in
     [start_date, end_date) -- both ISO date strings, end_date exclusive."""
     with get_conn() as conn:
@@ -528,7 +531,23 @@ def get_category_totals(chat_id, start_date, end_date):
         return [dict(r) for r in rows]
 
 
-def get_daily_totals(chat_id, start_date, end_date):
+def get_largest_expenses(chat_id: int, start_date: str, end_date: str, limit: int = 5) -> list[dict]:
+    """The `limit` largest individual non-claimable expenses (by amount_base)
+    in [start_date, end_date) -- both ISO date strings, end_date exclusive.
+    Feeds the /summary insights upgrade: a category total alone can't tell
+    a one-off big-ticket item from a spread of small purchases, so the
+    summary needs the actual standout transactions, not just the aggregate."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, amount, currency, amount_base, description, category, expense_date FROM expenses "
+            "WHERE chat_id = ? AND is_claimable = 0 AND expense_date >= ? AND expense_date < ? "
+            "ORDER BY amount_base DESC LIMIT ?",
+            (chat_id, start_date, end_date, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_daily_totals(chat_id: int, start_date: str, end_date: str) -> dict[str, float]:
     """Per-day non-claimable totals (base currency) in [start_date, end_date)
     -- both ISO date strings, end_date exclusive. Returns {date_str: total},
     omitting days with no spend (callers should default missing days to 0)."""
@@ -542,7 +561,7 @@ def get_daily_totals(chat_id, start_date, end_date):
         return {r["expense_date"]: r["total"] for r in rows}
 
 
-def get_month_to_date_total(chat_id):
+def get_month_to_date_total(chat_id: int) -> dict:
     """Sum of non-claimable spend (base currency) from the 1st of the
     current month through today (inclusive). Computed fresh from the raw
     expense rows every call -- no stored running total, so this needed no
@@ -566,7 +585,7 @@ def get_month_to_date_total(chat_id):
 # module docstring. calories_estimate is the number everything else (running
 # totals, /summary-style rollups) sums; low/high are kept for display only.
 
-def _meal_row(row):
+def _meal_row(row: sqlite3.Row) -> dict:
     d = dict(row)
     try:
         d["items"] = json.loads(d["items"]) if d["items"] else []
@@ -575,7 +594,8 @@ def _meal_row(row):
     return d
 
 
-def add_meal(chat_id, meal_type, items, calories_low, calories_high, calories_estimate, water_ml=None):
+def add_meal(chat_id: int, meal_type: str | None, items: list[str] | None, calories_low: float | None,
+             calories_high: float | None, calories_estimate: float | None, water_ml: float | None = None) -> int:
     """items: list of strings. Never raises on bad estimate math -- a null
     calories_estimate is stored as-is rather than blocking the log (mirrors
     fx.py's "never block on an estimate/lookup failure" discipline)."""
@@ -591,7 +611,7 @@ def add_meal(chat_id, meal_type, items, calories_low, calories_high, calories_es
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def get_recent_meals(chat_id, limit=10):
+def get_recent_meals(chat_id: int, limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM meals WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
@@ -600,7 +620,7 @@ def get_recent_meals(chat_id, limit=10):
         return [_meal_row(r) for r in rows]
 
 
-def get_meals_in_range(chat_id, start_date, end_date):
+def get_meals_in_range(chat_id: int, start_date: str, end_date: str) -> list[dict]:
     """Meal rows in [start_date, end_date) -- both ISO date strings,
     end_date exclusive. Same bounds convention as get_category_totals --
     used for the rundown synthesis (bot.py's _rundown_payload), not for
@@ -613,7 +633,7 @@ def get_meals_in_range(chat_id, start_date, end_date):
         return [_meal_row(r) for r in rows]
 
 
-def get_meal(chat_id, meal_id):
+def get_meal(chat_id: int, meal_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id)
@@ -621,7 +641,7 @@ def get_meal(chat_id, meal_id):
         return _meal_row(row) if row else None
 
 
-def get_daily_meal_totals(chat_id, day_str):
+def get_daily_meal_totals(chat_id: int, day_str: str) -> dict:
     """Running totals for one day -- the reply pattern this mirrors (from the
     ChatGPT thread this replaces) always shows a running calorie/water total
     alongside each new item, not just the item just logged."""
@@ -635,7 +655,7 @@ def get_daily_meal_totals(chat_id, day_str):
         return {"calories": row["calories"], "water_ml": row["water_ml"]}
 
 
-def edit_meal_date(chat_id, meal_id, new_date_str):
+def edit_meal_date(chat_id: int, meal_id: int, new_date_str: str) -> dict | None:
     """Moves a meal to a different meal_date. Unlike expenses, meals don't
     feed a rolling balance, so this is a plain field update -- no balance
     adjustment needed. Dates after today are clamped to today."""
@@ -653,7 +673,7 @@ def edit_meal_date(chat_id, meal_id, new_date_str):
     return get_meal(chat_id, meal_id)
 
 
-def delete_meal(chat_id, meal_id):
+def delete_meal(chat_id: int, meal_id: int) -> dict | None:
     row = get_meal(chat_id, meal_id)
     if row is None:
         return None
@@ -662,14 +682,14 @@ def delete_meal(chat_id, meal_id):
     return row
 
 
-def delete_most_recent_meal(chat_id):
+def delete_most_recent_meal(chat_id: int) -> dict | None:
     recent = get_recent_meals(chat_id, limit=1)
     if not recent:
         return None
     return delete_meal(chat_id, recent[0]["id"])
 
 
-def restore_deleted_meal(chat_id, row):
+def restore_deleted_meal(chat_id: int, row: dict) -> dict | None:
     """Re-inserts a previously deleted meal row exactly as it was. Used for
     one-step 'undo' after a natural-language correction deletes the wrong
     entry -- gets a fresh row id, every other field preserved."""
@@ -686,7 +706,8 @@ def restore_deleted_meal(chat_id, row):
 
 # ---------- workouts ----------
 
-def add_workout(chat_id, activity, duration_min=None, distance_km=None, notes=None):
+def add_workout(chat_id: int, activity: str, duration_min: float | None = None,
+                 distance_km: float | None = None, notes: str | None = None) -> int:
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
@@ -697,7 +718,7 @@ def add_workout(chat_id, activity, duration_min=None, distance_km=None, notes=No
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def get_recent_workouts(chat_id, limit=10):
+def get_recent_workouts(chat_id: int, limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM workouts WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
@@ -706,7 +727,7 @@ def get_recent_workouts(chat_id, limit=10):
         return [dict(r) for r in rows]
 
 
-def get_workouts_in_range(chat_id, start_date, end_date):
+def get_workouts_in_range(chat_id: int, start_date: str, end_date: str) -> list[dict]:
     """See get_meals_in_range's docstring -- same convention, used by
     bot.py's _rundown_payload."""
     with get_conn() as conn:
@@ -717,7 +738,7 @@ def get_workouts_in_range(chat_id, start_date, end_date):
         return [dict(r) for r in rows]
 
 
-def get_workout(chat_id, workout_id):
+def get_workout(chat_id: int, workout_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM workouts WHERE id = ? AND chat_id = ?", (workout_id, chat_id)
@@ -725,7 +746,7 @@ def get_workout(chat_id, workout_id):
         return dict(row) if row else None
 
 
-def edit_workout_date(chat_id, workout_id, new_date_str):
+def edit_workout_date(chat_id: int, workout_id: int, new_date_str: str) -> dict | None:
     row = get_workout(chat_id, workout_id)
     if row is None:
         return None
@@ -740,7 +761,7 @@ def edit_workout_date(chat_id, workout_id, new_date_str):
     return get_workout(chat_id, workout_id)
 
 
-def delete_workout(chat_id, workout_id):
+def delete_workout(chat_id: int, workout_id: int) -> dict | None:
     row = get_workout(chat_id, workout_id)
     if row is None:
         return None
@@ -749,14 +770,14 @@ def delete_workout(chat_id, workout_id):
     return row
 
 
-def delete_most_recent_workout(chat_id):
+def delete_most_recent_workout(chat_id: int) -> dict | None:
     recent = get_recent_workouts(chat_id, limit=1)
     if not recent:
         return None
     return delete_workout(chat_id, recent[0]["id"])
 
 
-def restore_deleted_workout(chat_id, row):
+def restore_deleted_workout(chat_id: int, row: dict) -> dict | None:
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, notes, workout_date) "
@@ -772,7 +793,8 @@ def restore_deleted_workout(chat_id, row):
 # One row per daily check-in. All fields nullable -- a check-in commonly
 # reports only some of weight/sleep/knee, plus a free-text note.
 
-def add_vitals(chat_id, weight_kg=None, sleep_hours=None, knee_pain=None, notes=None):
+def add_vitals(chat_id: int, weight_kg: float | None = None, sleep_hours: float | None = None,
+                knee_pain: float | None = None, notes: str | None = None) -> int:
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
@@ -783,7 +805,7 @@ def add_vitals(chat_id, weight_kg=None, sleep_hours=None, knee_pain=None, notes=
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def get_recent_vitals(chat_id, limit=10):
+def get_recent_vitals(chat_id: int, limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM vitals WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
@@ -792,7 +814,7 @@ def get_recent_vitals(chat_id, limit=10):
         return [dict(r) for r in rows]
 
 
-def get_vitals_in_range(chat_id, start_date, end_date):
+def get_vitals_in_range(chat_id: int, start_date: str, end_date: str) -> list[dict]:
     """See get_meals_in_range's docstring -- same convention, used by
     bot.py's _rundown_payload. Ordered oldest-first so callers can read
     weights[0]/weights[-1] as "start of window" / "latest" directly."""
@@ -804,7 +826,7 @@ def get_vitals_in_range(chat_id, start_date, end_date):
         return [dict(r) for r in rows]
 
 
-def get_vitals(chat_id, vitals_id):
+def get_vitals(chat_id: int, vitals_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM vitals WHERE id = ? AND chat_id = ?", (vitals_id, chat_id)
@@ -812,7 +834,7 @@ def get_vitals(chat_id, vitals_id):
         return dict(row) if row else None
 
 
-def edit_vitals_date(chat_id, vitals_id, new_date_str):
+def edit_vitals_date(chat_id: int, vitals_id: int, new_date_str: str) -> dict | None:
     row = get_vitals(chat_id, vitals_id)
     if row is None:
         return None
@@ -827,7 +849,7 @@ def edit_vitals_date(chat_id, vitals_id, new_date_str):
     return get_vitals(chat_id, vitals_id)
 
 
-def delete_vitals(chat_id, vitals_id):
+def delete_vitals(chat_id: int, vitals_id: int) -> dict | None:
     row = get_vitals(chat_id, vitals_id)
     if row is None:
         return None
@@ -836,14 +858,14 @@ def delete_vitals(chat_id, vitals_id):
     return row
 
 
-def delete_most_recent_vitals(chat_id):
+def delete_most_recent_vitals(chat_id: int) -> dict | None:
     recent = get_recent_vitals(chat_id, limit=1)
     if not recent:
         return None
     return delete_vitals(chat_id, recent[0]["id"])
 
 
-def restore_deleted_vitals(chat_id, row):
+def restore_deleted_vitals(chat_id: int, row: dict) -> dict | None:
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO vitals (chat_id, weight_kg, sleep_hours, knee_pain, notes, vitals_date) "
@@ -857,7 +879,7 @@ def restore_deleted_vitals(chat_id, row):
 
 # ---------- rolling conversation history ----------
 
-def add_message(chat_id, role, content):
+def add_message(chat_id: int, role: str, content: str) -> None:
     """role is 'user' or 'morrow'. No upper bound on table growth yet --
     a personal chat's text is small enough that this isn't worth trimming
     until it's actually a problem."""
@@ -869,7 +891,7 @@ def add_message(chat_id, role, content):
         )
 
 
-def get_recent_messages(chat_id, limit=30):
+def get_recent_messages(chat_id: int, limit: int = 30) -> list[dict]:
     """Returns the last `limit` turns in chronological order (oldest first)
     -- ready to drop straight into a prompt as conversation history, unlike
     get_recent_* elsewhere which return newest-first for display."""
@@ -883,7 +905,7 @@ def get_recent_messages(chat_id, limit=30):
 
 # ---------- durable memory ----------
 
-def set_memory(chat_id, label, content, category=None):
+def set_memory(chat_id: int, label: str, content: str, category: str | None = None) -> int:
     """Upsert by (chat_id, label), case-insensitive -- 'remember the biopolis
     plan' twice edits the same row instead of creating a near-duplicate.
     Returns the memory id."""
@@ -907,7 +929,7 @@ def set_memory(chat_id, label, content, category=None):
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def get_memory_list(chat_id, limit=40):
+def get_memory_list(chat_id: int, limit: int = 40) -> list[dict]:
     """Most-recently-updated first -- meant to be read in full into every
     prompt (see the messages module docstring), so this is capped the same
     way get_recent_meals etc. are, not because it's a display list."""
@@ -919,7 +941,7 @@ def get_memory_list(chat_id, limit=40):
         return [dict(r) for r in rows]
 
 
-def get_memory_by_label(chat_id, label):
+def get_memory_by_label(chat_id: int, label: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM memory WHERE chat_id = ? AND label = ? COLLATE NOCASE",
@@ -928,7 +950,7 @@ def get_memory_by_label(chat_id, label):
         return dict(row) if row else None
 
 
-def delete_memory_by_label(chat_id, label):
+def delete_memory_by_label(chat_id: int, label: str) -> dict | None:
     row = get_memory_by_label(chat_id, label)
     if row is None:
         return None
@@ -937,7 +959,7 @@ def delete_memory_by_label(chat_id, label):
     return row
 
 
-def restore_deleted_memory(chat_id, row):
+def restore_deleted_memory(chat_id: int, row: dict) -> dict | None:
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO memory (chat_id, label, category, content, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -949,7 +971,7 @@ def restore_deleted_memory(chat_id, row):
 
 # ---------- tasks ----------
 
-def add_task(chat_id, title, due_at=None, notes=None):
+def add_task(chat_id: int, title: str, due_at: str | None = None, notes: str | None = None) -> int:
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
@@ -959,7 +981,7 @@ def add_task(chat_id, title, due_at=None, notes=None):
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
-def get_task(chat_id, task_id):
+def get_task(chat_id: int, task_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ? AND chat_id = ?", (task_id, chat_id)
@@ -967,7 +989,7 @@ def get_task(chat_id, task_id):
         return dict(row) if row else None
 
 
-def get_recent_tasks(chat_id, limit=10):
+def get_recent_tasks(chat_id: int, limit: int = 10) -> list[dict]:
     """Most-recently-created first, matching every other domain's
     get_recent_* -- this is what feeds the AI's recent-items list for
     corrections, not the day-to-day to-do view (see get_open_tasks)."""
@@ -979,7 +1001,7 @@ def get_recent_tasks(chat_id, limit=10):
         return [dict(r) for r in rows]
 
 
-def get_open_tasks(chat_id, limit=20):
+def get_open_tasks(chat_id: int, limit: int = 20) -> list[dict]:
     """Not-done tasks, soonest due first (rows with no due_at sort last) --
     what /tasks and a future morning briefing actually want to show,
     as opposed to get_recent_tasks's creation-order list."""
@@ -992,7 +1014,7 @@ def get_open_tasks(chat_id, limit=20):
         return [dict(r) for r in rows]
 
 
-def edit_task_due(chat_id, task_id, new_due_at):
+def edit_task_due(chat_id: int, task_id: int, new_due_at: str | None) -> dict | None:
     row = get_task(chat_id, task_id)
     if row is None:
         return None
@@ -1003,7 +1025,7 @@ def edit_task_due(chat_id, task_id, new_due_at):
     return get_task(chat_id, task_id)
 
 
-def mark_task_done(chat_id, task_id):
+def mark_task_done(chat_id: int, task_id: int) -> dict | None:
     row = get_task(chat_id, task_id)
     if row is None:
         return None
@@ -1012,7 +1034,7 @@ def mark_task_done(chat_id, task_id):
     return get_task(chat_id, task_id)
 
 
-def unmark_task_done(chat_id, task_id):
+def unmark_task_done(chat_id: int, task_id: int) -> dict | None:
     """Undo for mark_task_done -- flips done back to 0 rather than
     restoring a deleted row, since marking done never deletes anything."""
     row = get_task(chat_id, task_id)
@@ -1023,7 +1045,7 @@ def unmark_task_done(chat_id, task_id):
     return get_task(chat_id, task_id)
 
 
-def delete_task(chat_id, task_id):
+def delete_task(chat_id: int, task_id: int) -> dict | None:
     row = get_task(chat_id, task_id)
     if row is None:
         return None
@@ -1032,7 +1054,7 @@ def delete_task(chat_id, task_id):
     return row
 
 
-def restore_deleted_task(chat_id, row):
+def restore_deleted_task(chat_id: int, row: dict) -> dict | None:
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO tasks (chat_id, title, due_at, done, notes) VALUES (?, ?, ?, ?, ?)",

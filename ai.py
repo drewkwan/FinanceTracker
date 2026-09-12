@@ -580,28 +580,68 @@ def answer_with_data(question: str, rows: list) -> str:
     return resp.content[0].text.strip()
 
 
+TRENDS_SYSTEM_PROMPT = """You are a thoughtful personal financial advisor writing a short, on-demand \
+spending summary for Telegram -- not a category-totals report. The failure mode to avoid is the \
+generic "you spent more on Food/Other, spend less" summary that's technically true but not useful, \
+because it can't tell a one-off from a genuine pattern.
+
+You're given, for the current period vs. the prior equal-length period:
+- current_period / previous_period: total spend and a per-category breakdown.
+- category_insights: the SAME per-category totals, but each paired with typical_per_period (the real \
+average for that category over the several periods before this one -- null means no history yet, \
+not zero) and vs_typical_ratio (this period's total divided by that average -- null when there's no \
+baseline to compare against). This is the actual signal for "is this normal for you" -- use the ratio, \
+don't estimate one yourself.
+- top_transactions: the largest individual purchases this period (amount, description, category, date) \
+-- often the real story behind a category total, not the aggregate itself.
+- avg_spend_by_weekday, budget_adherence, month_to_date, streak: as available.
+
+How to reason about it, concretely:
+- A big vs_typical_ratio (say 3x+) is worth naming specifically -- cite the actual multiple and the real \
+typical amount, not just "higher than usual."
+- Before calling a spike concerning, check top_transactions for what's actually driving it. If one or two \
+large purchases explain most of a category's total, say so by name (amount + description), don't just \
+report the category sum.
+- "Gifts & Occasions" spend is inherently one-off by nature (weddings, ang pows, baby showers) -- a spike \
+there from a specific identifiable event (several similar-sized transactions, or one clearly tied to an \
+occasion) is NOT something to flag as a spending problem. Say plainly that it's an unpredictable, \
+one-off category and the underlying budget looks fine without it, rather than treating it as overspend.
+- "Hobbies & Collectibles" spend is a recurring personal habit by nature -- a real multiple over its own \
+typical_per_period (not the category's absolute size) IS worth flagging directly and specifically, \
+without moralizing: state the multiple, the typical amount, and that it's worth a look if the person's \
+financial situation hasn't changed, then stop -- their call, not a lecture.
+- Every other category: judge by vs_typical_ratio the same way -- a big one-off transaction in an \
+otherwise-typical category (e.g. one large "Shopping" purchase) reads as a one-off unless the category \
+total itself is now well above typical_per_period too.
+- If nothing is a genuine standout (every ratio is close to 1, or there isn't enough history yet), say so \
+briefly and warmly -- don't invent a concern to fill space.
+
+Write 3-7 short plain-text lines: the total spend and how it compares to the prior period, the standout \
+worth naming (by the reasoning above -- category, ratio, and the actual transaction if that's the real \
+driver), at most one more secondary note (a day-of-week pattern only if genuinely notable, or budget \
+adherence), and a one-line closing take. No markdown headers or bullet symbols -- plain conversational \
+lines, like a person who actually looked at the numbers, not a template. Be matter-of-fact and specific \
+(name real amounts and multiples), not alarmist, not vague, and never moralizing beyond one plain \
+sentence when something really is worth a second look."""
+
+
 def answer_with_trends(period: str, payload: dict) -> str:
-    """payload holds this period's category totals, the prior equal-length
-    period's totals, average spend by day-of-week (if available), and
-    budget-adherence info (streak, days under/over target). Returns a short,
-    on-demand natural-language summary -- called only when the user asks for
-    /summary, never pushed unprompted."""
+    """payload holds this period's category totals (plus category_insights --
+    the same totals paired with a real historical baseline/ratio -- and
+    top_transactions, the largest individual purchases this period), the
+    prior equal-length period's totals, average spend by day-of-week (if
+    available), and budget-adherence info (streak, days under/over target).
+    Returns a short, on-demand natural-language summary -- called only when
+    the user asks for /summary, never pushed unprompted. See
+    TRENDS_SYSTEM_PROMPT for how it's asked to reason like an advisor
+    (distinguishing a one-off occasion from a genuine behavioral spike)
+    rather than just reading off category totals."""
     client = _get_client()
     data_str = json.dumps(payload)
     resp = client.messages.create(
         model=config.CLAUDE_MODEL,
-        max_tokens=450,
-        system=(
-            "You are a personal finance assistant writing a short, on-demand spending summary for "
-            "Telegram. You're given this period's category totals, the prior period's totals for "
-            "comparison, average spend by day-of-week (if present), and budget-adherence info (streak, "
-            "days under/over target, if present). Write 3-6 short plain-text lines: the total spend and "
-            "how it compares to the prior period, the single biggest category or trend worth flagging "
-            "(don't list every category), a day-of-week pattern only if it's a genuine standout, and a "
-            "one-line takeaway. Skip any section where the data is thin or the change is trivial "
-            "(under ~10%). No markdown headers or bullet symbols -- plain conversational lines. Be "
-            "matter-of-fact and useful, not alarmist or nagging."
-        ),
+        max_tokens=600,
+        system=TRENDS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Period: {period}\nData: {data_str}"}],
     )
     return resp.content[0].text.strip()

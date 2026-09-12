@@ -1,0 +1,49 @@
+"""
+Daily vitals check-ins: /logvitals, /recentvitals. Only fields actually
+mentioned are set -- a partial check-in is never padded with a guess.
+"""
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+import ai
+import db
+from access import _reject_if_not_allowed
+from formatting import _vitals_line
+from replies import _reply
+
+
+async def _log_vitals_and_reply(update: Update, chat_id: int, data: dict):
+    vitals_id = db.add_vitals(chat_id, data.get("weight_kg"), data.get("sleep_hours"),
+                               data.get("knee_pain"), data.get("notes") or data.get("vitals_notes"))
+    row = db.get_vitals(chat_id, vitals_id)
+    await _reply(update, chat_id, f"Logged: {_vitals_line(row)}")
+
+
+async def logvitals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    description = " ".join(context.args)
+    if not description:
+        await update.message.reply_text("Usage: /logvitals weight 76.6, slept 5.5 hours, knee 2/10")
+        return
+    data = ai.extract_vitals(description)
+    await _log_vitals_and_reply(update, chat_id, data)
+
+
+async def recentvitals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    limit = 10
+    if context.args:
+        try:
+            limit = max(1, min(50, int(context.args[0])))
+        except ValueError:
+            pass
+    rows = db.get_recent_vitals(chat_id, limit=limit)
+    if not rows:
+        await update.message.reply_text("No check-ins logged yet.")
+        return
+    await update.message.reply_text("Recent check-ins:\n" + "\n".join(_vitals_line(r) for r in rows))

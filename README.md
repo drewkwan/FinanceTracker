@@ -35,6 +35,14 @@ natural-language pattern.
   plus your average spend by day-of-week (over an 8-week lookback) and how
   many days in the period you stayed under target. Claude turns all of that
   into a few plain-language lines rather than a data dump — see "Usage" below.
+- **Advisor-style insights, not just category totals**: each category's total
+  is paired with a real historical baseline (its average over the several
+  periods before this one) and the actual largest individual transactions in
+  the period. That's what lets `/summary` tell a one-off occasion (several
+  wedding ang pows this month) from a genuine behavioral spike (a hobby
+  category running well above its usual rate), and name the specific
+  transaction actually driving a category total instead of just reporting the
+  sum — see "Usage" below for what that looks like in practice.
 
 ## How meal and workout logging works
 
@@ -330,6 +338,17 @@ worth knowing: how this period compares to the last one, which category moved
 the most, whether a particular day of the week tends to be pricier, and how
 many days you stayed under target. Thin or trivial signals (e.g. a change
 under ~10%) are left out rather than padding the message.
+
+It reasons about *why* a category moved, not just that it did. Four wedding
+ang pows this month reads as "Gifts & Occasions is up, but that's an
+unpredictable one-off category — without it you'd be well within budget,"
+rather than a flat "you spent more on Gifts." A real 15x jump on a recurring
+hobby category reads as "you've used up the month's budget on Pokémon cards
+— a real spike from your usual ~$200/month, worth a look if nothing's
+changed financially" — naming the actual multiple and the actual typical
+amount, not a vague "spend less." Both come from a real historical baseline
+per category and the actual largest transactions in the period, computed in
+Python and handed to Claude to narrate — never estimated by the model itself.
 
 ## Notes / limitations
 

@@ -10,8 +10,6 @@ calls (ai._get_client is always mocked), throwaway SQLite per test.
 import asyncio
 import datetime as dt
 
-import pytest
-
 import ai
 import bot
 import db

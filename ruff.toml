@@ -1,0 +1,29 @@
+# Ruff configuration for Morrow (the personal companion bot / JARVIS module).
+# Deliberately lenient on style: this project favors long single-line
+# f-strings and AI prompt text over aggressive wrapping, so line-length is
+# relaxed rather than fought. The goal is to catch real bugs (unused
+# imports, undefined names, shadowed builtins) -- not to enforce a
+# particular formatting convention.
+
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E731",  # lambda assignments -- used deliberately in a couple of tests/fakes
+]
+
+[lint.per-file-ignores]
+# bot.py is a thin facade (see its module docstring): every import in it is
+# a deliberate re-export for `import bot; bot.<name>` call sites (tests,
+# and anything else outside this package), not dead code, so F401 doesn't
+# apply here. It also can't move its imports above `load_dotenv()`, which
+# must run before anything transitively does `import config` -- hence E402.
+"bot.py" = ["E402", "F401"]
+# app.py is the real entrypoint and has the same load_dotenv()-before-import
+# ordering requirement as bot.py.
+"app.py" = ["E402"]
+# ai.py's system-prompt strings are long by nature; wrapping them would hurt
+# the prompt text's own readability more than it helps the code around it.
+"ai.py" = ["E501"]
