@@ -15,6 +15,9 @@ Commands:
   /undo                   remove the single most recent expense
   /edit <id> <amount> [description...]   fix a mislogged expense
   /delete <id>            remove a specific expense by ID
+  /addtask <description>  add a to-do, e.g. "call the dentist tomorrow 5pm"
+  /tasks                  show the open to-do list, soonest due first
+  /done <id>              mark a to-do done
 
 You can also just type naturally, e.g. "spent 15 on uber" or
 "paid 20 USD for taxi, claimable" and the bot will parse, categorize, and
@@ -134,6 +137,13 @@ def _vitals_line(row: dict) -> str:
     return f"#{row['id']} {summary}{notes} ({row['vitals_date']})"
 
 
+def _task_line(row: dict) -> str:
+    due = f" (due {row['due_at']})" if row.get("due_at") else ""
+    done_tag = " [done]" if row.get("done") else ""
+    notes = f" -- {row['notes']}" if row.get("notes") else ""
+    return f"#{row['id']} {row['title']}{due}{notes}{done_tag}"
+
+
 def _daily_meal_totals_text(chat_id: int) -> str:
     totals = db.get_daily_meal_totals(chat_id, db.today_str())
     line = f"Today's running total: ~{totals['calories']:.0f} kcal"
@@ -188,10 +198,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "See recent check-ins: /recentvitals\n\n"
         "See what I remember: /memory\n"
         "Remove something remembered: /forget <label>\n\n"
+        "Add a to-do: /addtask call the dentist tomorrow 5pm\n"
+        "See what's open: /tasks\n"
+        "Mark one done: /done <id>\n\n"
         "How's everything going, across money/food/training/vitals together: /rundown\n\n"
         "Or just tell me naturally, e.g. \"spent 15 on uber\", \"had a mango\", \"played tennis for an hour\", "
-        "\"weight 76.6, slept 5.5 hours\", \"remember I go to Fitness First Bugis Tue/Thu\", or \"how am I doing "
-        "this week\" -- and just talk to me the rest of the time, I'll keep up with the thread."
+        "\"weight 76.6, slept 5.5 hours\", \"remember I go to Fitness First Bugis Tue/Thu\", \"remind me to call "
+        "the dentist tomorrow\", or \"how am I doing this week\" -- and just talk to me the rest of the time, "
+        "I'll keep up with the thread."
     )
 
 
@@ -317,6 +331,29 @@ def _recent_text(chat_id: int, limit: int = 10) -> str:
         return "No expenses logged yet."
     lines = [_expense_line(r) for r in rows]
     return "Recent expenses:\n" + "\n".join(lines)
+
+
+def _tasks_text(chat_id: int) -> str:
+    """Shared by /tasks and the natural-language 'what's on my list' intent
+    -- see _balance_text's docstring for why. Open (not-done) tasks only,
+    soonest due first -- db.get_open_tasks, not get_recent_tasks (that one
+    feeds the AI's correction-target list in creation order instead)."""
+    rows = db.get_open_tasks(chat_id)
+    if not rows:
+        return "Nothing on your to-do list right now."
+    return "Open to-dos:\n" + "\n".join(_task_line(r) for r in rows)
+
+
+def _due_at_from_fields(due_in_days, due_time) -> str | None:
+    """Deterministic due-date computation in Python -- the model only ever
+    extracts a day-count and an optional clock time, never a calendar date
+    (see PARSE_SYSTEM_PROMPT's log_task rules and days_ago's identical
+    discipline for corrections)."""
+    if not isinstance(due_in_days, int) or due_in_days < 0:
+        return None
+    today = date.fromisoformat(db.today_str())
+    due_date = today + timedelta(days=due_in_days)
+    return f"{due_date.isoformat()} {due_time}" if due_time else due_date.isoformat()
 
 
 RUNDOWN_WINDOW_DAYS = 7
@@ -622,6 +659,63 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Forgot \"{deleted['label']}\". Reply 'undo' if that's wrong.")
 
 
+async def _log_task_and_reply(update: Update, chat_id: int, data: dict):
+    """data may come from either parse_message's natural-language schema
+    (task_title/task_due_in_days/task_due_time/task_notes) or extract_task's
+    own field names (title/due_in_days/due_time/notes) -- merged the same
+    way _log_vitals_and_reply merges vitals_notes/notes, so /addtask and the
+    natural-language path share this one code path."""
+    title = data.get("task_title") or data.get("title") or "to-do"
+    due_in_days = data.get("task_due_in_days")
+    if due_in_days is None:
+        due_in_days = data.get("due_in_days")
+    due_time = data.get("task_due_time") or data.get("due_time")
+    notes = data.get("task_notes") or data.get("notes")
+    due_at = _due_at_from_fields(due_in_days, due_time)
+    task_id = db.add_task(chat_id, title, due_at, notes)
+    row = db.get_task(chat_id, task_id)
+    await _reply(update, chat_id, f"Added: {_task_line(row)}")
+
+
+async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    description = " ".join(context.args)
+    if not description:
+        await update.message.reply_text("Usage: /addtask call the dentist tomorrow 5pm")
+        return
+    data = ai.extract_task(description)
+    await _log_task_and_reply(update, chat_id, data)
+
+
+async def tasks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(_tasks_text(chat_id))
+
+
+async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text("Usage: /done <id> (see /tasks for IDs)")
+        return
+    try:
+        task_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("That doesn't look like a task ID. Try: /done 3")
+        return
+    updated = db.mark_task_done(chat_id, task_id)
+    if updated is None:
+        await update.message.reply_text("Couldn't find that to-do -- run /tasks to check the ID.")
+        return
+    context.chat_data[LAST_CORRECTION_KEY] = {"domain": "task", "action": "mark_done", "expense_id": task_id}
+    await update.message.reply_text(f"Marked done: {_task_line(updated)}. Reply 'undo' if that's wrong.")
+
+
 WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -803,6 +897,15 @@ def _recent_vitals_for_ai(chat_id: int) -> list:
     ]
 
 
+def _recent_tasks_for_ai(chat_id: int) -> list:
+    """Open (not-done) tasks, soonest due first -- what a task correction
+    (mark_done/delete) may target. Deliberately db.get_open_tasks, not
+    get_recent_tasks -- a done or long-since-created task shouldn't be a
+    valid correction target for a fresh 'mark that done' message."""
+    rows = db.get_open_tasks(chat_id, limit=20)
+    return [{"id": r["id"], "title": r["title"], "due_at": r["due_at"]} for r in rows]
+
+
 def _recent_messages_for_ai(chat_id: int) -> list:
     rows = db.get_recent_messages(chat_id, limit=RECENT_MESSAGES_FOR_AI)
     return [{"role": r["role"], "content": r["content"]} for r in rows]
@@ -856,6 +959,9 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
         elif action == "edit_date":
             row = ops["edit_date"](chat_id, snap["expense_id"], snap["old_date"])
             await _reply(update, chat_id, f"Reverted -- {ops['noun']} is back to {row[ops['date_field']]}.")
+        elif action == "mark_done":
+            row = ops["unmark_done"](chat_id, snap["expense_id"])
+            await _reply(update, chat_id, f"Reverted -- back to open: {ops['line'](row)}")
         return True
 
     if action == "delete":
@@ -883,41 +989,53 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
     return True
 
 
+# Registry for the non-expense domains, which all share a narrower
+# correction surface than expenses (see _handle_simple_domain_correction).
+# Each domain declares its own "actions" allowlist -- meal/workout/vitals
+# support edit_date + delete; task supports mark_done + delete instead,
+# since a forward-looking due date can't reuse days_ago's backward-only
+# "today - N days" math (see PARSE_SYSTEM_PROMPT's correction rules).
 SIMPLE_DOMAIN_ACTIONS = {"edit_date", "delete"}
+TASK_DOMAIN_ACTIONS = {"mark_done", "delete"}
 
-# Registry for the three non-expense domains, which all share the same
-# narrower correction surface (see _handle_simple_domain_correction).
 _DOMAIN_OPS = {
     "meal": {"noun": "meal", "recent_cmd": "/recentmeals", "date_field": "meal_date",
+              "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
               "get": db.get_meal, "edit_date": db.edit_meal_date, "delete": db.delete_meal,
               "restore": db.restore_deleted_meal, "line": _meal_line},
     "workout": {"noun": "workout", "recent_cmd": "/recentworkouts", "date_field": "workout_date",
+                 "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                  "get": db.get_workout, "edit_date": db.edit_workout_date, "delete": db.delete_workout,
                  "restore": db.restore_deleted_workout, "line": _workout_line},
     "vitals": {"noun": "check-in", "recent_cmd": "/recentvitals", "date_field": "vitals_date",
+                "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                 "get": db.get_vitals, "edit_date": db.edit_vitals_date, "delete": db.delete_vitals,
                 "restore": db.restore_deleted_vitals, "line": _vitals_line},
+    "task": {"noun": "to-do", "recent_cmd": "/tasks",
+              "actions": TASK_DOMAIN_ACTIONS, "actions_desc": "only marking one done or deleting one",
+              "get": db.get_task, "delete": db.delete_task, "restore": db.restore_deleted_task,
+              "line": _task_line, "mark_done": db.mark_task_done, "unmark_done": db.unmark_task_done},
 }
 
 
 async def _handle_simple_domain_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                             parsed: dict, domain: str, recent_ids: set):
-    """Corrections for meal/workout/vitals targets are intentionally
-    narrower than expenses right now -- only moving the date or deleting a
-    duplicate/mistake, which covers the flagship case ("that log from
-    yesterday was wrong, tag it to the day before instead") without needing
-    a field-level /editmeal-style command yet for any of the three."""
+    """Corrections for meal/workout/vitals/task targets are intentionally
+    narrower than expenses right now -- each domain's own "actions"
+    allowlist (see _DOMAIN_OPS) covers its flagship case (moving a date or
+    deleting a duplicate for meal/workout/vitals; marking done or deleting
+    for task) without needing a field-level /editmeal-style command yet."""
     ops = _DOMAIN_OPS[domain]
     chat_id = update.effective_chat.id
     target_id = parsed.get("target_expense_id")
     action = parsed.get("correction_action")
     noun, recent_cmd = ops["noun"], ops["recent_cmd"]
 
-    if target_id not in recent_ids or action not in SIMPLE_DOMAIN_ACTIONS:
+    if target_id not in recent_ids or action not in ops["actions"]:
         await _reply(
             update, chat_id,
             f"I'm not sure which {noun} you mean, or that kind of edit isn't supported yet for "
-            f"{noun}s -- only moving the date or deleting one is. Run {recent_cmd} to see recent entries."
+            f"{noun}s -- {ops['actions_desc']} is. Run {recent_cmd} to see recent entries."
         )
         return
 
@@ -948,6 +1066,14 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
         )
         return
 
+    if action == "mark_done":
+        updated = ops["mark_done"](chat_id, target_id)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "mark_done", "expense_id": target_id,
+        }
+        await _reply(update, chat_id, f"Marked done: {ops['line'](updated)}. Reply 'undo' if that's wrong.")
+        return
+
     if action == "delete":
         deleted = ops["delete"](chat_id, target_id)
         context.chat_data[LAST_CORRECTION_KEY] = {"domain": domain, "action": "delete", "row": deleted}
@@ -957,7 +1083,8 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
 
 async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict,
                               recent_ids: set, recent_meal_ids: set = frozenset(),
-                              recent_workout_ids: set = frozenset(), recent_vitals_ids: set = frozenset()):
+                              recent_workout_ids: set = frozenset(), recent_vitals_ids: set = frozenset(),
+                              recent_task_ids: set = frozenset()):
     """Applies a correction the AI identified against one of the chat's
     recent expenses/meals/workouts/vitals. Every confirmation message here
     is built from real values just read back from the database -- never
@@ -977,6 +1104,9 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if domain == "vitals":
         await _handle_simple_domain_correction(update, context, parsed, "vitals", recent_vitals_ids)
+        return
+    if domain == "task":
+        await _handle_simple_domain_correction(update, context, parsed, "task", recent_task_ids)
         return
 
     if target_id not in recent_ids or action not in CORRECTION_ACTIONS:
@@ -1130,6 +1260,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_workout_ids = {r["id"] for r in recent_workouts}
     recent_vitals = _recent_vitals_for_ai(chat_id)
     recent_vitals_ids = {r["id"] for r in recent_vitals}
+    recent_tasks = _recent_tasks_for_ai(chat_id)
+    recent_task_ids = {r["id"] for r in recent_tasks}
     # The message just added above is deliberately included here -- the
     # model should see its own current turn as part of the running thread,
     # not just what came before it.
@@ -1140,11 +1272,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # We asked a clarifying question; treat this message as the answer.
         merged_text = f"{pending['original']}\n(Additional info: {text})"
         parsed = ai.parse_message(merged_text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_messages, memory_list)
+                                   recent_tasks, recent_messages, memory_list)
     else:
         merged_text = text
         parsed = ai.parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_messages, memory_list)
+                                   recent_tasks, recent_messages, memory_list)
 
     intent = parsed.get("intent")
 
@@ -1161,7 +1293,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intent == "correction":
         context.chat_data.pop(PENDING_KEY, None)
         await _handle_correction(update, context, parsed, recent_ids, recent_meal_ids,
-                                  recent_workout_ids, recent_vitals_ids)
+                                  recent_workout_ids, recent_vitals_ids, recent_task_ids)
         return
 
     if intent == "show_balance":
@@ -1200,6 +1332,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intent == "log_vitals":
         context.chat_data.pop(PENDING_KEY, None)
         await _log_vitals_and_reply(update, chat_id, parsed)
+        return
+
+    if intent == "log_task":
+        context.chat_data.pop(PENDING_KEY, None)
+        await _log_task_and_reply(update, chat_id, parsed)
+        return
+
+    if intent == "show_tasks":
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(update, chat_id, _tasks_text(chat_id))
         return
 
     if intent == "remember":
@@ -1338,6 +1480,9 @@ def main():
     app.add_handler(CommandHandler("recentvitals", recentvitals))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
+    app.add_handler(CommandHandler("addtask", addtask_cmd))
+    app.add_handler(CommandHandler("tasks", tasks_cmd))
+    app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(on_error)

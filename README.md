@@ -4,8 +4,9 @@ Tracks a daily spending allowance with rollover, keeps claimable/reimbursable
 expenses separate, supports multiple currencies, and uses Claude to categorize
 purchases and answer free-form questions about your spending. Also tracks
 meals (text or a photo, with a calorie range and a running daily total),
-workouts, and daily vitals check-ins (weight, sleep, knee pain), all in the
-same database, through the same natural-language pattern.
+workouts, daily vitals check-ins (weight, sleep, knee pain), and to-dos with
+optional due dates, all in the same database, through the same
+natural-language pattern.
 
 ## How the money math works
 
@@ -116,6 +117,29 @@ expense-only and answer *today's* numbers directly; `/rundown` is the one
 that reads across money, food, training, and vitals together over the
 last week.
 
+## How to-dos work
+
+- **Add one** with `/addtask <description>` or naturally — "remind me to call
+  the dentist tomorrow 5pm", "add buy milk to my list", "need to submit the
+  report by friday". A due date/time is only set if you actually mention one;
+  otherwise the to-do just sits on the list with no deadline.
+- **Due dates are computed in code, never guessed by Claude** — same
+  discipline as expense date corrections. The model only ever extracts *how
+  many days from today* (and a clock time, if one was mentioned); Morrow
+  turns that into an actual calendar date.
+- **See what's open** with `/tasks`, or ask naturally ("what's on my list?",
+  "what do I need to do?") — soonest-due-first, undated to-dos last, done
+  ones left off the list entirely.
+- **Mark one done** with `/done <id>` or naturally ("I finished calling the
+  dentist", "mark the dentist call as done") — reverses with one-word `undo`,
+  same as other corrections.
+- **Corrections are intentionally narrower than meals/workouts/vitals right
+  now**: only marking a to-do done or deleting it, not rescheduling — a
+  forward-looking due date can't reuse the backward-only "N days ago" math
+  the other domains' date corrections rely on. Ask to reschedule and Morrow
+  will say so rather than silently doing the wrong thing; delete and re-add
+  works in the meantime.
+
 ## Files
 
 | File | Purpose |
@@ -221,6 +245,10 @@ Message your bot on Telegram — `/start` should reply immediately.
 /memory                          list everything currently remembered
 /forget <label>                  remove a remembered item (see /memory for exact labels)
 
+/addtask <description>            add a to-do, e.g. /addtask call the dentist tomorrow 5pm
+/tasks                            show the open to-do list, soonest due first
+/done <id>                        mark a to-do done
+
 /rundown                         cross-domain check-in: money + food + training + vitals, last 7 days
 ```
 
@@ -238,6 +266,9 @@ Or skip commands and just type naturally:
 > remember I go to Fitness First Bugis Tue/Thu for legs and back
 > forget the Bugis gym plan
 > what's my split today? (answered from what's already remembered, no lookup command needed)
+> remind me to call the dentist tomorrow 5pm
+> what's on my list?
+> I finished calling the dentist
 > how am I doing this week? (a real cross-domain check-in, not a guess)
 
 And beyond logging/remembering, just talk to it — Morrow keeps the last

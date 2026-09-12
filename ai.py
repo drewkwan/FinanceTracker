@@ -3,10 +3,10 @@ Claude-powered parsing and categorization.
 
 Entry points:
   - parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-    recent_messages, memory_list):
+    recent_tasks, recent_messages, memory_list):
     classifies a free-text chat message into exactly one intent -- logging an
-    expense/meal/workout/vitals check-in, a correction to something already
-    logged, remembering/forgetting a durable fact, casual chat, or a
+    expense/meal/workout/vitals check-in or to-do, a correction to something
+    already logged, remembering/forgetting a durable fact, casual chat, or a
     clarifying question -- and extracts the structured fields needed to act
     on it. recent_messages (the rolling conversation history) and memory_list
     (the user's full durable memory) are folded into every call so replies
@@ -21,6 +21,8 @@ Entry points:
     is already known -- estimates a calorie range the same way, text or
     vision.
   - extract_workout(description): used by /logworkout the same way.
+  - extract_task(description): used by /addtask the same way, extracting a
+    title, a due-in-days count, an optional due time, and notes.
   - answer_with_data(question, context_rows): used for on-demand analytics,
     turns raw category totals into a short natural-language answer.
   - answer_with_trends(period, payload): the /summary trend narrative.
@@ -71,7 +73,9 @@ COMMAND_LIST = (
     "/logworkout <description> (log a workout), /recentworkouts [n] (last n logged workouts), "
     "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n], "
     "/memory (list everything currently remembered), /forget <label> (remove a remembered item), "
-    "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days)"
+    "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days), "
+    "/addtask <description> (add a to-do, e.g. 'call the dentist tomorrow 5pm'), "
+    "/tasks (show the open to-do list, soonest due first), /done <id> (mark a to-do done)"
 )
 
 PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
@@ -85,6 +89,8 @@ or snack between meals). The bot's real commands, for when you need to point the
 You will also be given several JSON lists for context:
 - Recent expenses, meals, workouts, and vitals check-ins (each most recent first, each with an "id"). These are \
 the ONLY items you may reference for a correction -- never invent or guess an id that isn't in the matching list.
+- Recent open to-dos (most recent first, each with an "id", "title", "due_at"). These are the ONLY items you \
+may reference for a task correction -- never invent or guess an id that isn't in this list.
 - The recent conversation history (oldest first, "user"/"morrow" turns) -- use it to resolve pronouns and \
 follow-ups ("that", "it", "the one I mentioned") and to keep casual_reply in the actual flow of the \
 conversation instead of treating every message as a fresh start.
@@ -96,7 +102,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "correction" | "show_balance" | "show_recent" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -120,10 +126,18 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "knee_pain": number or null (log_vitals only -- a 0-10 scale, only if a pain level is actually mentioned),
   "vitals_notes": string or null (log_vitals only -- anything else worth keeping from a check-in),
 
-  "target_domain": "expense" | "meal" | "workout" | "vitals" or null (correction only -- which recent-<domain> list
-    target_expense_id refers to; null means "expense", for backward compatibility),
+  "task_title": string or null (log_task only -- a short, actionable phrase for what needs doing),
+  "task_due_in_days": integer or null (log_task only -- 0 = due today, 1 = due tomorrow, 2 = due in two days,
+    etc.; null if no due date was mentioned. Extract WHICH day as a plain count of days from today; never
+    compute or output an actual calendar date yourself, that's done in code),
+  "task_due_time": string or null (log_task only -- "HH:MM" 24-hour time ONLY if a specific clock time was
+    mentioned alongside the date, e.g. "by 5pm friday" -> "17:00"; null otherwise),
+  "task_notes": string or null (log_task only -- any extra detail worth keeping beyond the title),
+
+  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" or null (correction only -- which
+    recent-<domain> list target_expense_id refers to; null means "expense", for backward compatibility),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain> list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" or null (correction only),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back; never compute or output an
     actual calendar date yourself, that's done in code),
@@ -168,25 +182,35 @@ Deciding the intent:
   never guess a value that wasn't given. This is distinct from log_workout -- a message can report vitals
   only, a workout only, or both (if it clearly reports both, prefer whichever is more specific/detailed and
   let the other be logged in a follow-up message rather than guessing at fields for the one you skip).
-- "correction": the message is about something ALREADY logged, in ANY of the three domains -- fixing the
-  currency/amount/description/category/date of a past entry, or asking to delete a duplicate/mistake (e.g.
-  "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double logged my lunch",
-  "delete that", "actually it was $50 not $15", "that log from yesterday was wrong, tag it to the day before
-  instead", "delete that meal, I logged it twice"). First decide target_domain from context (an amount/currency
-  strongly implies "expense"; food/calories implies "meal"; a workout activity implies "workout" -- when
-  genuinely ambiguous between domains, prefer whichever domain has an item matching the description/date, and
-  if more than one domain plausibly matches, use "clarification" instead). Then identify the ONE matching item
-  in that domain's recent list -- match on whatever the message gives you: amount/description, OR just a
-  date/day reference alone (e.g. "yesterday's log", "the one from Monday") is enough on its own if exactly one
-  recent item in that domain has that date, even with no amount or description mentioned. Set
-  target_expense_id to its "id". Only "expense" targets support edit_currency/edit_amount/edit_description/
-  edit_category -- for "meal" or "workout" targets, only "edit_date" and "delete" are supported right now; if
-  the user wants some other field fixed on a meal/workout, use "clarification" and say only date/delete
-  corrections work for those right now. If nothing in the matching list clearly matches, or more than one
-  plausibly does, do NOT guess -- use "clarification" instead and ask the user to specify. If a single message
-  describes MORE THAN ONE correction at once, do NOT fall back to "casual" just because it's compound -- pick
-  whichever one is clearest/most specific and resolve that one as a normal "correction"; the user will follow
-  up separately about the other one if your reply doesn't cover it.
+- "log_task": the message is describing a new to-do/reminder to track -- a one-off actionable item, optionally
+  with a deadline (e.g. "remind me to call the dentist tomorrow", "add buy milk to my list", "need to submit
+  the report by friday 5pm", "todo: renew my passport"). Extract task_title as a short, actionable phrase (not
+  a full sentence), task_due_in_days/task_due_time only if a due date/time was actually mentioned (never invent
+  one), and task_notes for any extra detail worth keeping. This is distinct from "remember" -- "remember" is
+  for standing durable facts/goals/preferences with no deadline; "log_task" is for a concrete thing to be done
+  and then checked off.
+- "correction": the message is about something ALREADY logged, in ANY of the four domains -- fixing the
+  currency/amount/description/category/date of a past entry, marking/deleting a to-do, or asking to delete a
+  duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
+  logged my lunch", "delete that", "actually it was $50 not $15", "that log from yesterday was wrong, tag it to
+  the day before instead", "delete that meal, I logged it twice", "mark the dentist call as done", "I finished
+  that", "delete that task, never mind"). First decide target_domain from context (an amount/currency strongly
+  implies "expense"; food/calories implies "meal"; a workout activity implies "workout"; a to-do title/deadline
+  implies "task" -- when genuinely ambiguous between domains, prefer whichever domain has an item matching the
+  description/date, and if more than one domain plausibly matches, use "clarification" instead). Then identify
+  the ONE matching item in that domain's recent list -- match on whatever the message gives you: amount/
+  description, OR just a date/day reference alone (e.g. "yesterday's log", "the one from Monday") is enough on
+  its own if exactly one recent item in that domain has that date, even with no amount or description
+  mentioned. Set target_expense_id to its "id". Only "expense" targets support edit_currency/edit_amount/
+  edit_description/edit_category -- for "meal" or "workout" targets, only "edit_date" and "delete" are
+  supported right now; for "task" targets, only "mark_done" and "delete" are supported right now (rescheduling
+  a due date isn't supported yet). If the user wants some other field fixed on a meal/workout/task, use
+  "clarification" and say only those specific corrections work for that domain right now. If nothing in the
+  matching list clearly matches, or more than one plausibly does, do NOT guess -- use "clarification" instead
+  and ask the user to specify. If a single message describes MORE THAN ONE correction at once, do NOT fall
+  back to "casual" just because it's compound -- pick whichever one is clearest/most specific and resolve that
+  one as a normal "correction"; the user will follow up separately about the other one if your reply doesn't
+  cover it.
 - "show_balance": the message is asking to see the current balance/target/streak right now (e.g. "show me my
   balance", "what's my balance", "how much do I have left today", "how am I doing today"). This is answered
   directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,
@@ -197,6 +221,9 @@ Deciding the intent:
 - "show_recent": the message is asking to see recently logged expenses (e.g. "show me today's log", "what
   have I logged recently", "show me my expenses"). Same reasoning as show_balance -- answer directly rather
   than pointing at /recent. Expense-only, same caveat as show_balance for meals/workouts.
+- "show_tasks": the message is asking to see the to-do list / what's outstanding (e.g. "what's on my list",
+  "what do I need to do", "show me my tasks", "what's still open"). Answered directly with the real open-tasks
+  list, same discipline as show_balance/show_recent -- not a casual_reply guessing at what's on it.
 - "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain -- money, food,
   training, and vitals together -- not a single domain's number (e.g. "how am I doing", "how's my week been",
   "give me a rundown", "how am I doing overall", "what's going on with me lately"). This pulls real 7-day
@@ -276,6 +303,15 @@ Rules for log_meal fields:
 - calories_low/calories_high/calories_estimate should always be set together for a log_meal -- never leave
   calories_estimate null while giving a range, or vice versa.
 
+Rules for log_task fields:
+- task_title should be a short, actionable phrase capturing what needs doing (e.g. "call the dentist", "submit
+  the report"), not a full restated sentence.
+- task_due_in_days is a plain count of days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) -- unlike
+  days_ago there's no cap, since due dates can be far in the future. Leave it null if no due date was
+  mentioned; never invent one.
+- task_due_time is only set if a specific clock time was mentioned alongside the date (e.g. "by 5pm friday" ->
+  "17:00"); leave it null otherwise, even if a due date was given.
+
 Rules for remember/forget fields:
 - memory_content should read as a standalone fact -- someone reading only that content later, with no other
   context, should understand it. Write it out plainly rather than echoing the user's shorthand.
@@ -289,24 +325,29 @@ Rules for remember/forget fields:
 
 def parse_message(text: str, recent_expenses: list | None = None, recent_meals: list | None = None,
                    recent_workouts: list | None = None, recent_vitals: list | None = None,
-                   recent_messages: list | None = None, memory_list: list | None = None) -> dict:
+                   recent_tasks: list | None = None, recent_messages: list | None = None,
+                   memory_list: list | None = None) -> dict:
     """recent_expenses: list of {id, amount, currency, description, category,
     expense_date, is_claimable} dicts, most recent first -- typically the
     last ~8 for this chat. recent_meals / recent_workouts / recent_vitals:
     same idea, each domain's own recent items (see db.get_recent_meals /
-    get_recent_workouts / get_recent_vitals). recent_messages: list of
-    {role, content} dicts, oldest first (see db.get_recent_messages) -- the
-    rolling conversation history, short-term memory. memory_list: list of
-    {label, category, content} dicts (see db.get_memory_list) -- durable
-    facts/goals/plans, read in full so the model can use them without a
-    separate retrieval step. Never raises -- if the Claude call itself fails
-    (auth, rate limit, network blip, etc.), falls back to a clarification
-    response so the bot always replies to the user instead of going silent.
+    get_recent_workouts / get_recent_vitals). recent_tasks: list of
+    {id, title, due_at} dicts for open (not-done) to-dos (see
+    db.get_open_tasks) -- what a task correction (mark_done/delete) may
+    target. recent_messages: list of {role, content} dicts, oldest first
+    (see db.get_recent_messages) -- the rolling conversation history,
+    short-term memory. memory_list: list of {label, category, content}
+    dicts (see db.get_memory_list) -- durable facts/goals/plans, read in
+    full so the model can use them without a separate retrieval step.
+    Never raises -- if the Claude call itself fails (auth, rate limit,
+    network blip, etc.), falls back to a clarification response so the bot
+    always replies to the user instead of going silent.
     """
     recent_expenses = recent_expenses or []
     recent_meals = recent_meals or []
     recent_workouts = recent_workouts or []
     recent_vitals = recent_vitals or []
+    recent_tasks = recent_tasks or []
     recent_messages = recent_messages or []
     memory_list = memory_list or []
     user_content = (
@@ -318,6 +359,8 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
         f"{json.dumps(recent_workouts)}\n\n"
         f"Recent vitals check-ins (most recent first, only reference an id from here for target_domain=vitals):\n"
         f"{json.dumps(recent_vitals)}\n\n"
+        f"Open to-dos (soonest due first, only reference an id from here for target_domain=task):\n"
+        f"{json.dumps(recent_tasks)}\n\n"
         f"Recent conversation history (oldest first):\n"
         f"{json.dumps(recent_messages)}\n\n"
         f"Durable memory (a label, category, and content per item -- only source of remembered facts, only "
@@ -490,6 +533,36 @@ def extract_vitals(description: str) -> dict:
         return fallback
 
 
+TASK_EXTRACT_SYSTEM_PROMPT = """You extract a to-do/reminder from a short description. Reply with ONLY a \
+JSON object: {"title": short actionable phrase capturing what needs doing, "due_in_days": integer count of \
+days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) or null if no due date was mentioned, \
+"due_time": "HH:MM" 24-hour time ONLY if a specific clock time was mentioned alongside the date (e.g. "by 5pm \
+friday" -> "17:00"), else null, "notes": a short string capturing anything else worth keeping, or null}. Never \
+invent a due date or time that wasn't mentioned."""
+
+
+def extract_task(description: str) -> dict:
+    """Used by /addtask for a known description -- same division of labor as
+    extract_workout/extract_vitals. Never raises -- falls back to the raw
+    text as the title with no due date, rather than blocking the add if the
+    Claude call fails."""
+    fallback = {"title": description or "to-do", "due_in_days": None, "due_time": None, "notes": None}
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=150,
+            system=TASK_EXTRACT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": description or "to-do"}],
+        )
+        raw = resp.content[0].text.strip()
+        data = _parse_json_or_none(raw)
+        return data if data else fallback
+    except Exception:
+        logger.exception("extract_task: Claude call failed, falling back to the raw description")
+        return fallback
+
+
 def answer_with_data(question: str, rows: list) -> str:
     """rows: list of {category, total, n} dicts. Returns a short natural-language summary."""
     client = _get_client()
@@ -586,6 +659,10 @@ def _clarify_fallback(message: str) -> dict:
         "sleep_hours": None,
         "knee_pain": None,
         "vitals_notes": None,
+        "task_title": None,
+        "task_due_in_days": None,
+        "task_due_time": None,
+        "task_notes": None,
         "target_domain": None,
         "target_expense_id": None,
         "correction_action": None,

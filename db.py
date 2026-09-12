@@ -37,6 +37,12 @@ Design (see README for the full explanation):
   same named slot instead of piling up copies. This is what answers "pull
   up my workout plan" -- unlike `messages`, it's meant to be read in full on
   every call, not just recently.
+- `tasks`: to-dos, one row per item. `due_at` is an ISO date (`YYYY-MM-DD`)
+  or date+time (`YYYY-MM-DD HH:MM`) string, or null for a task with no due
+  date -- text-sortable either way, so ORDER BY due_at still works with a
+  mix of dated and undated rows. `done` is a simple flag rather than a
+  separate completed-tasks table; a done task stays queryable for "did I
+  already do X" without needing a join.
 
 Rollover math (matches the spec exactly):
   Day 1: target=$100, spend $30 -> leftover = $100 - $30 = $70 -> balance += 70
@@ -153,6 +159,17 @@ def init_db():
                 category TEXT,
                 content TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                due_at TEXT,
+                done INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
         # Forward-compatible migration in case this is an existing db from
@@ -928,3 +945,98 @@ def restore_deleted_memory(chat_id, row):
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_memory_by_label(chat_id, row["label"]) if new_id else None
+
+
+# ---------- tasks ----------
+
+def add_task(chat_id, title, due_at=None, notes=None):
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO tasks (chat_id, title, due_at, notes) VALUES (?, ?, ?, ?)",
+            (chat_id, title, due_at, notes),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_task(chat_id, task_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND chat_id = ?", (task_id, chat_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_recent_tasks(chat_id, limit=10):
+    """Most-recently-created first, matching every other domain's
+    get_recent_* -- this is what feeds the AI's recent-items list for
+    corrections, not the day-to-day to-do view (see get_open_tasks)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_open_tasks(chat_id, limit=20):
+    """Not-done tasks, soonest due first (rows with no due_at sort last) --
+    what /tasks and a future morning briefing actually want to show,
+    as opposed to get_recent_tasks's creation-order list."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE chat_id = ? AND done = 0 "
+            "ORDER BY (due_at IS NULL), due_at, id LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def edit_task_due(chat_id, task_id, new_due_at):
+    row = get_task(chat_id, task_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET due_at = ? WHERE id = ? AND chat_id = ?", (new_due_at, task_id, chat_id)
+        )
+    return get_task(chat_id, task_id)
+
+
+def mark_task_done(chat_id, task_id):
+    row = get_task(chat_id, task_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("UPDATE tasks SET done = 1 WHERE id = ? AND chat_id = ?", (task_id, chat_id))
+    return get_task(chat_id, task_id)
+
+
+def unmark_task_done(chat_id, task_id):
+    """Undo for mark_task_done -- flips done back to 0 rather than
+    restoring a deleted row, since marking done never deletes anything."""
+    row = get_task(chat_id, task_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("UPDATE tasks SET done = 0 WHERE id = ? AND chat_id = ?", (task_id, chat_id))
+    return get_task(chat_id, task_id)
+
+
+def delete_task(chat_id, task_id):
+    row = get_task(chat_id, task_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM tasks WHERE id = ? AND chat_id = ?", (task_id, chat_id))
+    return row
+
+
+def restore_deleted_task(chat_id, row):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO tasks (chat_id, title, due_at, done, notes) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, row["title"], row["due_at"], row["done"], row["notes"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_task(chat_id, new_id)

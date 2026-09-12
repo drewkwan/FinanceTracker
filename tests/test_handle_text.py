@@ -86,7 +86,7 @@ def test_multi_round_clarification_accumulates_context_instead_of_overwriting(mo
     captured_texts = []
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         captured_texts.append(text)
         return next(responses)
 
@@ -124,7 +124,7 @@ def test_multiple_expenses_in_one_message_are_all_logged(monkeypatch):
     context = FakeContext()
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {
             "intent": "log_expense",
             "expenses": [
@@ -155,7 +155,7 @@ def test_single_expense_reply_wording_unchanged(monkeypatch):
     context = FakeContext()
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {
             "intent": "log_expense",
             "expenses": [{"amount": 12.5, "currency": None, "description": "lunch",
@@ -189,7 +189,7 @@ def test_show_balance_answers_directly_with_real_numbers(monkeypatch):
     context = FakeContext()
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {"intent": "show_balance", "clarification_question": None, "casual_reply": None,
                 **_no_op_extra_fields()}
 
@@ -207,7 +207,7 @@ def test_show_recent_answers_directly_with_real_data(monkeypatch):
     context = FakeContext()
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {"intent": "show_recent", "clarification_question": None, "casual_reply": None,
                 **_no_op_extra_fields()}
 
@@ -237,7 +237,7 @@ def test_correction_can_target_by_date_reference_alone(monkeypatch):
     context = FakeContext()
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_expense_id": target["id"], "correction_action": "edit_date",
             "days_ago": 2, "clarification_question": None, "casual_reply": None,

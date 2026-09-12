@@ -229,7 +229,7 @@ def test_natural_language_log_meal_updates_running_total(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return _log_meal_response()
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
@@ -287,7 +287,7 @@ def test_natural_language_log_workout(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {"intent": "log_workout", "activity": "tennis", "duration_min": 60,
                 "distance_km": None, "workout_notes": "won 2 sets",
                 "clarification_question": None, "casual_reply": None}
@@ -306,7 +306,7 @@ def test_correction_can_target_a_meal_by_domain(monkeypatch):
     meal_id = db.add_meal(CHAT, "Snack", ["duplicate mango"], 90, 120, 105)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
             "correction_action": "delete", "days_ago": None,
@@ -325,7 +325,7 @@ def test_undo_reverts_a_meal_deletion(monkeypatch):
     meal_id = db.add_meal(CHAT, "Snack", ["mango"], 90, 120, 105)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None):
         return {
             "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
             "correction_action": "delete", "days_ago": None,
