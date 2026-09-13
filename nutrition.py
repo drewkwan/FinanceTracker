@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 import ai
 import db
 from access import _reject_if_not_allowed
+from fitness import _log_workout_and_reply
 from formatting import _calorie_range, _daily_meal_totals_text, _meal_line
 from replies import _reply
 
@@ -81,9 +82,18 @@ async def logmeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """A food photo, sent with or without a caption, logs a meal directly --
-    no command needed. Any other use for a photo isn't supported yet, so
-    this assumes every photo sent to the bot is a meal."""
+    """A photo, sent with or without a caption, logs directly -- no command
+    needed. What it logs AS depends on what the photo actually shows
+    (ai.extract_from_photo classifies it first, rather than assuming every
+    photo is a meal):
+    - real food/drink -> logged as a meal, same as before.
+    - a fitness app/wearable's calorie-burned or workout-stats screen ->
+      logged as a workout instead (this is the fix for a real bug: this
+      case used to either get logged as a fake, nonsense meal built from the
+      caption, or -- an earlier, narrower fix -- get rejected outright as
+      "not food" even though it plainly was useful data, just not a meal).
+    - anything else (a receipt, an unrelated photo, ...) -> not logged;
+      asks what the user actually wants to do with it instead of guessing."""
     if await _reject_if_not_allowed(update):
         return
     chat_id = update.effective_chat.id
@@ -91,8 +101,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]  # highest-resolution size Telegram offers
     tg_file = await photo.get_file()
     image_bytes = bytes(await tg_file.download_as_bytearray())
-    data = ai.extract_meal_from_image(image_bytes, caption)
-    await _log_meal_and_reply(update, chat_id, data)
+    data = ai.extract_from_photo(image_bytes, caption)
+    kind = data.get("kind")
+    if kind == "meal":
+        await _log_meal_and_reply(update, chat_id, data)
+    elif kind == "workout":
+        await _log_workout_and_reply(update, chat_id, data)
+    else:
+        await _reply(
+            update, chat_id,
+            "I couldn't tell that was a food photo or a workout/fitness stats screen, so I didn't log anything. "
+            "Tell me what it shows (a meal, or calories burned/a workout) and I'll log that instead."
+        )
 
 
 async def recentmeals(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -79,11 +79,34 @@ def test_add_and_get_workout_roundtrip():
     assert row["activity"] == "tennis"
     assert row["duration_min"] == 60
     assert row["notes"] == "won 2 sets"
+    assert row["calories_burned"] is None  # not every workout reports it (e.g. a typed /logworkout)
     assert row["workout_date"] == db.today_str()
 
 
+def test_add_workout_stores_calories_burned():
+    """Calories burned is the main field a fitness app/wearable screenshot
+    contributes (see ai.extract_from_photo) -- distinct from meals'
+    calories_estimate (calories out vs calories in)."""
+    workout_id = db.add_workout(CHAT, "daily activity", calories_burned=540, notes="2,300 steps")
+    row = db.get_workout(CHAT, workout_id)
+    assert row["calories_burned"] == 540
+
+
+def test_get_daily_workout_totals_sums_same_day_only():
+    db.add_workout(CHAT, "run", calories_burned=300)
+    db.add_workout(CHAT, "daily activity", calories_burned=240)
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO workouts (chat_id, activity, calories_burned, workout_date) VALUES (?, 'run', 999, ?)",
+            (CHAT, yesterday.isoformat()),
+        )
+    totals = db.get_daily_workout_totals(CHAT, db.today_str())
+    assert totals["calories_burned"] == 540  # today's two entries only, not yesterday's 999
+
+
 def test_edit_workout_date_and_delete_restore():
-    workout_id = db.add_workout(CHAT, "run", distance_km=2.4)
+    workout_id = db.add_workout(CHAT, "run", distance_km=2.4, calories_burned=310)
     yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
     moved = db.edit_workout_date(CHAT, workout_id, yesterday)
     assert moved["workout_date"] == yesterday
@@ -93,9 +116,10 @@ def test_edit_workout_date_and_delete_restore():
     restored = db.restore_deleted_workout(CHAT, deleted)
     assert restored["activity"] == "run"
     assert restored["distance_km"] == 2.4
+    assert restored["calories_burned"] == 310  # must carry through delete/restore, not just get dropped
 
 
-# ---------- ai.py: extract_meal / extract_meal_from_image / extract_workout ----------
+# ---------- ai.py: extract_meal / extract_from_photo / extract_workout ----------
 
 def test_extract_meal_happy_path(monkeypatch):
     import json
@@ -114,7 +138,7 @@ def test_extract_meal_never_raises_on_api_failure(monkeypatch):
     assert result["items"] == ["some meal"]  # raw text preserved rather than lost
 
 
-def test_extract_meal_from_image_sends_image_content_block(monkeypatch):
+def test_extract_from_photo_sends_image_content_block(monkeypatch):
     """Regression guard mirroring test_parse_message_passes_recent_expenses_into_the_prompt:
     the image must actually be sent as an image content block, not just the caption text."""
     import json
@@ -125,24 +149,47 @@ def test_extract_meal_from_image_sends_image_content_block(monkeypatch):
             captured["messages"] = kwargs.get("messages")
             return super().create(**kwargs)
 
-    payload = {"meal_type": "Dinner", "items": ["rice", "chicken"], "calories_low": 990,
+    payload = {"kind": "meal", "meal_type": "Dinner", "items": ["rice", "chicken"], "calories_low": 990,
                "calories_high": 1360, "calories_estimate": 1170, "water_ml": None}
     fake = _CapturingClient(json.dumps(payload))
     monkeypatch.setattr(ai, "_get_client", lambda: fake)
 
-    result = ai.extract_meal_from_image(b"fake-jpeg-bytes", caption="my usual dinner")
+    result = ai.extract_from_photo(b"fake-jpeg-bytes", caption="my usual dinner")
     content_blocks = captured["messages"][0]["content"]
     types = [b["type"] for b in content_blocks]
     assert "image" in types
     assert content_blocks[types.index("image")]["source"]["media_type"] == "image/jpeg"
+    assert result["kind"] == "meal"
     assert result["calories_estimate"] == 1170
 
 
-def test_extract_meal_from_image_never_raises_on_api_failure(monkeypatch):
+def test_extract_from_photo_never_raises_on_api_failure(monkeypatch):
     _mock_client(monkeypatch, TypeError("boom"))
-    result = ai.extract_meal_from_image(b"bytes", caption="dinner")
-    assert result["calories_estimate"] is None
-    assert result["items"] == ["dinner"]
+    result = ai.extract_from_photo(b"bytes", caption="dinner")
+    assert result == {"kind": "unclear"}
+
+
+def test_extract_from_photo_recognizes_a_fitness_stats_screenshot_as_a_workout(monkeypatch):
+    """Regression test for a real bad interaction: a screenshot of a
+    FITNESS app's daily calorie-burned stats -- not food, but genuinely
+    useful data -- got either logged as a fake meal built from the caption
+    ("Here are my calorie stats..." -- unknown kcal) or, an earlier and
+    still-wrong fix, rejected outright as "not food" even though it plainly
+    showed real calories-burned data. The model now classifies this shape of
+    photo as kind "workout" with calories_burned set, and extract_from_photo
+    must surface that as-is so it gets logged as a workout, not dropped."""
+    import json
+    payload = {"kind": "workout", "activity": "daily activity", "duration_min": None,
+               "distance_km": None, "calories_burned": 540, "notes": "2,300 steps"}
+    _mock_client(monkeypatch, json.dumps(payload))
+    result = ai.extract_from_photo(b"fake-screenshot-bytes", caption="my calorie stats from today")
+    assert result == payload
+
+
+def test_extract_from_photo_falls_back_to_unclear_on_an_unparseable_reply(monkeypatch):
+    _mock_client(monkeypatch, "not valid json at all")
+    result = ai.extract_from_photo(b"fake-bytes", caption=None)
+    assert result == {"kind": "unclear"}
 
 
 def test_extract_workout_happy_path(monkeypatch):
@@ -309,19 +356,66 @@ def test_photo_message_logs_a_meal(monkeypatch):
     db.get_or_create_user(CHAT)
     captured = {}
 
-    def fake_extract_from_image(image_bytes, caption=None):
+    def fake_extract_from_photo(image_bytes, caption=None):
         captured["image_bytes"] = image_bytes
         captured["caption"] = caption
-        return {"meal_type": "Dinner", "items": ["rice", "sambal sotong", "fried chicken"],
+        return {"kind": "meal", "meal_type": "Dinner", "items": ["rice", "sambal sotong", "fried chicken"],
                 "calories_low": 990, "calories_high": 1360, "calories_estimate": 1170, "water_ml": None}
 
-    monkeypatch.setattr(bot.ai, "extract_meal_from_image", fake_extract_from_image)
+    monkeypatch.setattr(bot.ai, "extract_from_photo", fake_extract_from_photo)
     update = FakeUpdate(CHAT, caption="dinner at home", photo=[_FakePhotoSize()])
     _run(bot.handle_photo(update, FakeContext()))
     assert captured["caption"] == "dinner at home"
     assert captured["image_bytes"] == b"fake-jpeg-bytes"
     assert any("1170" in r or "990" in r for r in update.message.replies)
     assert db.get_recent_meals(CHAT)[0]["calories_estimate"] == 1170
+
+
+def test_photo_of_a_fitness_stats_screenshot_logs_a_workout_against_todays_calories(monkeypatch):
+    """Regression test for the real bad interaction: a screenshot of a
+    FITNESS app's daily calorie-burned stats (not food) was logged as a
+    fake meal titled with the caption text ("unknown kcal") -- and even
+    after that was fixed to reject non-food photos outright, it was STILL
+    wrong, because this genuinely useful data (calories burned) was simply
+    dropped instead of being recognized and logged. handle_photo must now
+    log it as a workout with calories_burned set, and the reply must show
+    it against today's calories already eaten -- burning calories in
+    isolation, with nothing to compare it to, isn't the point."""
+    db.get_or_create_user(CHAT)
+    db.add_meal(CHAT, "Lunch", ["chicken rice"], 500, 700, 600, water_ml=None)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {"kind": "workout", "activity": "daily activity",
+                                            "duration_min": None, "distance_km": None,
+                                            "calories_burned": 540, "notes": "2,300 steps"},
+    )
+    update = FakeUpdate(CHAT, caption="Here are my calorie stats from the day that's just past",
+                         photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, FakeContext()))
+
+    assert len(db.get_recent_meals(CHAT)) == 1  # just the lunch logged above -- the photo added no meal
+    workouts = db.get_recent_workouts(CHAT)
+    assert len(workouts) == 1
+    assert workouts[0]["calories_burned"] == 540
+
+    reply = update.message.replies[-1]
+    assert "540" in reply  # calories burned
+    assert "600" in reply  # today's calories in (the lunch logged above)
+    assert not any(r.startswith("I couldn't tell") for r in update.message.replies)
+
+
+def test_photo_of_something_unrelated_is_not_logged_at_all(monkeypatch):
+    """Once extract_from_photo reports kind "unclear" (a receipt, a random
+    photo, anything with no food or fitness data), handle_photo must skip
+    logging entirely -- no meal row, no workout row -- and ask instead of
+    guessing."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(bot.ai, "extract_from_photo", lambda image_bytes, caption=None: {"kind": "unclear"})
+    update = FakeUpdate(CHAT, caption="random photo", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, FakeContext()))
+    assert db.get_recent_meals(CHAT) == []
+    assert db.get_recent_workouts(CHAT) == []
+    assert not any("Logged" in r for r in update.message.replies)
 
 
 def test_natural_language_log_workout(monkeypatch):

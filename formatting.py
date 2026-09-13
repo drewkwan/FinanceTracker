@@ -60,6 +60,8 @@ def _workout_line(row: dict) -> str:
         bits.append(f"{row['duration_min']:.0f} min")
     if row.get("distance_km"):
         bits.append(f"{row['distance_km']:.1f} km")
+    if row.get("calories_burned"):
+        bits.append(f"{row['calories_burned']:.0f} kcal burned")
     detail = f" ({', '.join(bits)})" if bits else ""
     notes = f" -- {row['notes']}" if row.get("notes") else ""
     return f"#{row['id']} {row.get('activity') or 'workout'}{detail}{notes} ({row['workout_date']})"
@@ -96,3 +98,19 @@ def _daily_meal_totals_text(chat_id: int) -> str:
     if totals["water_ml"]:
         line += f", {totals['water_ml']:.0f}ml water"
     return line
+
+
+def _daily_calorie_balance_text(chat_id: int) -> str:
+    """Calories in vs calories out for today -- shown alongside a logged
+    workout that reports calories_burned (e.g. from a fitness app
+    screenshot, see ai.extract_from_photo), so burning calories is actually
+    useful information rather than a number logged in isolation. Meal
+    calories logged today is "in", today's summed workout calories_burned is
+    "out"; net can go either way depending on which is bigger."""
+    day = db.today_str()
+    calories_in = db.get_daily_meal_totals(chat_id, day)["calories"]
+    calories_out = db.get_daily_workout_totals(chat_id, day)["calories_burned"]
+    net = calories_in - calories_out
+    sign = "-" if net < 0 else ""
+    return (f"Today: ~{calories_in:.0f} kcal in, ~{calories_out:.0f} kcal burned "
+            f"(net {sign}{abs(net):.0f} kcal)")

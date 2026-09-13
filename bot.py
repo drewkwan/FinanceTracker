@@ -75,9 +75,10 @@ from finance import (
     settarget,
     undo,
 )
-from fitness import logworkout_cmd, recentworkouts
+from fitness import _log_workout_and_reply, logworkout_cmd, recentworkouts
 from formatting import (
     _calorie_range,
+    _daily_calorie_balance_text,
     _daily_meal_totals_text,
     _expense_line,
     _meal_line,

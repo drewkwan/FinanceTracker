@@ -16,11 +16,14 @@ Entry points:
     bot.py's job, using real DB values.
   - categorize(description): given a known amount/description (e.g. from
     /log or /claim), returns just the category tag.
-  - extract_meal(description) / extract_meal_from_image(image_bytes, caption):
-    used by /logmeal and photo logging for a description/photo whose intent
-    is already known -- estimates a calorie range the same way, text or
-    vision.
-  - extract_workout(description): used by /logworkout the same way.
+  - extract_meal(description): used by /logmeal for a description whose
+    intent is already known -- estimates a calorie range.
+  - extract_from_photo(image_bytes, caption): used by photo logging, where
+    the intent ISN'T known yet -- classifies the photo itself as a meal, a
+    fitness/workout-stats screen, or neither, then extracts the matching
+    fields (see its own docstring for the bug this exists to avoid).
+  - extract_workout(description): used by /logworkout the same way as
+    extract_meal.
   - extract_task(description): used by /addtask the same way, extracting a
     title, a due-in-days count, an optional due time, and notes.
   - answer_with_data(question, context_rows): used for on-demand analytics,
@@ -471,20 +474,46 @@ def categorize(description: str) -> str:
         return "Other"
 
 
-MEAL_ESTIMATE_SYSTEM_PROMPT = f"""You estimate calories for a described or pictured meal, the same way an \
-attentive nutrition-tracking assistant would: a plausible range, not false precision. If given a photo, use \
-visible portion sizes; if given a caption or description too, use it to refine quantities. Reply with ONLY a \
-JSON object: {{"meal_type": one of [{MEAL_TYPE_LIST}] or null if it doesn't fit a slot (e.g. a drink or snack \
-between meals), "items": [list of individual food/drink items as short strings], "calories_low": number, \
-"calories_high": number, "calories_estimate": number (the central estimate, roughly the midpoint), "water_ml": \
-number or null (ONLY for plain water -- never other drinks; null if no water is mentioned/shown)}}. Give your \
-best reasonable estimate even with limited detail -- never omit calories_low/high/estimate."""
+MEAL_ESTIMATE_SYSTEM_PROMPT = f"""You estimate calories for a described meal, the same way an attentive \
+nutrition-tracking assistant would: a plausible range, not false precision. Use the description to refine \
+quantities. Reply with ONLY a JSON object: {{"meal_type": one of [{MEAL_TYPE_LIST}] or null if it doesn't fit a \
+slot (e.g. a drink or snack between meals), "items": [list of individual food/drink items as short strings], \
+"calories_low": number, "calories_high": number, "calories_estimate": number (the central estimate, roughly the \
+midpoint), "water_ml": number or null (ONLY for plain water -- never other drinks; null if no water is \
+mentioned)}}. Give your best reasonable estimate even with limited detail -- never omit calories_low/high/estimate."""
 
 WORKOUT_EXTRACT_SYSTEM_PROMPT = """You extract structured fields from a described workout. Reply with ONLY a \
 JSON object: {"activity": short activity name e.g. "tennis", "IPPT training", "gym", "run", "duration_min": \
-number or null if not mentioned, "distance_km": number or null, "notes": a short note capturing any detail \
-worth keeping (splits, sets, how it felt) or null}. Give your best reasonable interpretation even from a short \
-description."""
+number or null if not mentioned, "distance_km": number or null, "calories_burned": number or null if not \
+mentioned, "notes": a short note capturing any detail worth keeping (splits, sets, how it felt) or null}. Give \
+your best reasonable interpretation even from a short description."""
+
+PHOTO_CLASSIFY_SYSTEM_PROMPT = f"""You look at a photo sent to a health-tracking bot and figure out what it \
+actually shows, then extract structured data for it. Reply with ONLY a JSON object, matching exactly ONE of \
+these three shapes:
+
+1. An actual food or drink photo -- a plate, bowl, glass, or container of something to eat or drink, judged by \
+visible portion sizes (refine with the caption if one is given):
+{{"kind": "meal", "meal_type": one of [{MEAL_TYPE_LIST}] or null if it doesn't fit a slot, "items": [list of \
+individual food/drink items as short strings], "calories_low": number, "calories_high": number, \
+"calories_estimate": number, "water_ml": number or null (ONLY for plain water)}}
+
+2. A fitness/workout stats screen -- a summary from a fitness app or wearable showing calories burned, active \
+minutes, steps, distance, a named workout, and similar (this is NOT a photo of food, even if calories are on \
+screen):
+{{"kind": "workout", "activity": short name (e.g. "run", "cycling"; use "daily activity" for a general \
+activity/calorie summary rather than one named workout), "duration_min": number or null, "distance_km": number \
+or null, "calories_burned": number or null, "notes": short string for any other detail worth keeping (steps, \
+heart rate, active minutes) or null}}
+
+3. Anything else -- a receipt, a document, an unrelated photo, or an image with no food or fitness data in it \
+at all:
+{{"kind": "unclear"}}
+
+Use the caption for extra detail if one is given. For kind "meal" always give calories_low/high/estimate, never \
+omit them. For kind "workout" extract whatever fields ARE actually visible on screen -- leave the rest null \
+rather than guessing at numbers that aren't shown. Never invent a meal or workout that isn't actually shown in \
+the photo -- that produces a nonsense logged entry, which is worse than asking."""
 
 
 def _meal_fallback(seed_text: str | None) -> dict:
@@ -520,32 +549,47 @@ def extract_meal(description: str) -> dict:
         return fallback
 
 
-def extract_meal_from_image(image_bytes: bytes, caption: str | None = None) -> dict:
-    """Vision-based meal extraction from a Telegram food photo, optionally
-    with a caption for extra portion detail (e.g. "small bowl of rice, 3
-    pieces of chicken"). Mirrors extract_meal's fallback discipline -- never
-    raises, falls back to a null estimate (caption kept as the item, if any)
-    rather than blocking the log if the vision call fails. Telegram's
-    "photo" message type always transcodes to JPEG, so media_type is fixed."""
-    fallback = _meal_fallback(caption)
+def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
+    """Vision-based classify-and-extract for any photo sent to the bot (see
+    handle_photo), optionally with a caption for extra detail. A photo can
+    show three different things, and each needs a different downstream
+    action, so the model reports which one it actually is rather than
+    handle_photo just assuming every photo is a meal:
+    - real food/drink -> {"kind": "meal", ...} logged as a meal
+    - a fitness app/wearable's calorie-burned or workout-stats screen ->
+      {"kind": "workout", ...}, calories_burned included so it can be shown
+      against today's calories eaten
+    - anything else (a receipt, a random photo, ...) -> {"kind": "unclear"}
+
+    This replaces an earlier, narrower version that only ever asked "is this
+    food, yes or no" -- a real bug from that version: someone's screenshot of
+    their FITNESS app's daily calorie-burned stats got rejected outright
+    ("not food") instead of being recognized for what it actually was and
+    logged as a workout. Never raises, and falls back to {"kind": "unclear"}
+    rather than guessing wildly if the vision call fails or the model's reply
+    doesn't parse into one of the three known shapes. Telegram's "photo"
+    message type always transcodes to JPEG, so media_type is fixed."""
+    fallback = {"kind": "unclear"}
     try:
         client = _get_client()
         b64 = base64.b64encode(image_bytes).decode("ascii")
         user_content = [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-            {"type": "text", "text": caption or "Estimate the meal shown in this photo."},
+            {"type": "text", "text": caption or "What does this photo show?"},
         ]
         resp = client.messages.create(
             model=config.CLAUDE_MODEL,
             max_tokens=300,
-            system=MEAL_ESTIMATE_SYSTEM_PROMPT,
+            system=PHOTO_CLASSIFY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
         raw = resp.content[0].text.strip()
         data = _parse_json_or_none(raw)
-        return data if data else fallback
+        if not data or data.get("kind") not in ("meal", "workout", "unclear"):
+            return fallback
+        return data
     except Exception:
-        logger.exception("extract_meal_from_image: Claude vision call failed, falling back to a null estimate")
+        logger.exception("extract_from_photo: Claude vision call failed, falling back to 'unclear'")
         return fallback
 
 

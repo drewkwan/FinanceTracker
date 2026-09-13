@@ -71,6 +71,12 @@ natural-language pattern.
   caption, and no command needed; Claude estimates portions from the image
   the same way it estimates from a text description, refining with the
   caption when there is one.
+- **A photo isn't assumed to be food — it's classified first.** A screenshot
+  of a fitness app or wearable's daily stats (calories burned, steps, active
+  minutes) is recognized as that, not force-fit into a fake meal, and gets
+  logged as a **workout** instead, with `calories_burned` set. Anything else
+  (a receipt, a random photo) isn't logged at all — Morrow asks what you
+  actually meant rather than guessing.
 - **Water is tracked separately from calories.** Mention plain water (e.g.
   "750ml water") and it adds to a running `water_ml` total for the day,
   never estimated for other drinks.
@@ -85,6 +91,10 @@ natural-language pattern.
   hour, won 2 sets") capture activity, duration, distance when mentioned, and
   free-text notes for anything else worth keeping (splits, sets, how it felt)
   rather than forcing structure that isn't there yet.
+- **Calories burned are shown against calories eaten.** When a workout is
+  logged with `calories_burned` set (typically from a fitness app/wearable
+  screenshot — see above), the reply also shows today's running "calories in
+  vs calories burned" balance, not just the number in isolation.
 - **Vitals** (`/logvitals` or natural language, e.g. "weight 76.6, slept 5.5
   hours, knee 2/10") log whatever you mention — weight, sleep hours, knee
   pain (0-10), and free-text notes — leaving anything you didn't mention

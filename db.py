@@ -21,7 +21,11 @@ Design (see README for the full explanation):
   (hydration, not calories) and is null on entries that aren't plain water.
 - `workouts`: one row per logged session. `notes` stays free text rather than
   forcing IPPT times or tennis sets into rigid columns before it's clear
-  what's worth tracking structurally.
+  what's worth tracking structurally. `calories_burned` is nullable and
+  separate from `meals.calories_estimate` (calories out vs calories in) --
+  a fitness app/wearable's stats screenshot is the main source for it (see
+  ai.extract_from_photo), rather than something typed workouts usually
+  report themselves.
 - `vitals`: one row per daily check-in (weight, sleep, knee pain, or any
   subset -- all nullable, since not every check-in reports everything).
   Separate from `workouts` because it's reported on its own cadence, not
@@ -134,6 +138,7 @@ def init_db() -> None:
                 activity TEXT,
                 duration_min REAL,
                 distance_km REAL,
+                calories_burned REAL,
                 notes TEXT,
                 workout_date TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -190,6 +195,7 @@ def init_db() -> None:
         _add_column_if_missing(conn, "expenses", "amount_base", "amount_base REAL")
         # Backfill amount_base for any pre-existing rows (assume same as amount if it was null).
         conn.execute("UPDATE expenses SET amount_base = amount WHERE amount_base IS NULL")
+        _add_column_if_missing(conn, "workouts", "calories_burned", "calories_burned REAL")
 
 
 def _now_local_date() -> date:
@@ -746,13 +752,14 @@ def restore_deleted_meal(chat_id: int, row: dict) -> dict | None:
 # ---------- workouts ----------
 
 def add_workout(chat_id: int, activity: str, duration_min: float | None = None,
-                 distance_km: float | None = None, notes: str | None = None) -> int:
+                 distance_km: float | None = None, notes: str | None = None,
+                 calories_burned: float | None = None) -> int:
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, notes, workout_date) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, activity, duration_min, distance_km, notes, today_str()),
+            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, calories_burned, notes, "
+            "workout_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, activity, duration_min, distance_km, calories_burned, notes, today_str()),
         )
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
@@ -819,13 +826,26 @@ def delete_most_recent_workout(chat_id: int) -> dict | None:
 def restore_deleted_workout(chat_id: int, row: dict) -> dict | None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, notes, workout_date) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, row["activity"], row["duration_min"], row["distance_km"], row["notes"],
-             row["workout_date"]),
+            "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, calories_burned, notes, "
+            "workout_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, row["activity"], row["duration_min"], row["distance_km"], row.get("calories_burned"),
+             row["notes"], row["workout_date"]),
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_workout(chat_id, new_id)
+
+
+def get_daily_workout_totals(chat_id: int, day_str: str) -> dict:
+    """Running calories-burned total for one day -- the counterpart to
+    get_daily_meal_totals, used to show calories burned against calories
+    eaten (see formatting._daily_calorie_balance_text)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(calories_burned), 0) AS calories_burned FROM workouts "
+            "WHERE chat_id = ? AND workout_date = ?",
+            (chat_id, day_str),
+        ).fetchone()
+        return {"calories_burned": row["calories_burned"]}
 
 
 # ---------- vitals ----------
