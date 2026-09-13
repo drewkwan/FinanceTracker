@@ -186,9 +186,12 @@ def test_parse_message_passes_recent_meals_and_workouts_into_the_prompt(monkeypa
 # ---------- bot.py: natural-language and photo logging ----------
 
 def _log_meal_response(**overrides):
+    meals = overrides.pop("meals", None) or [
+        {"meal_type": "Snack", "items": ["mango"],
+         "calories_low": 90, "calories_high": 120, "calories_estimate": 105, "water_ml": None}
+    ]
     base = {
-        "intent": "log_meal", "meal_type": "Snack", "items": ["mango"], "meal_items": ["mango"],
-        "calories_low": 90, "calories_high": 120, "calories_estimate": 105, "water_ml": None,
+        "intent": "log_meal", "meals": meals,
         "clarification_question": None, "casual_reply": None,
     }
     base.update(overrides)
@@ -236,6 +239,46 @@ def test_natural_language_log_meal_updates_running_total(monkeypatch):
     assert any("mango" in r for r in update.message.replies)
     assert any("running total" in r.lower() for r in update.message.replies)
     assert db.get_recent_meals(CHAT)[0]["items"] == ["mango"]
+
+
+def test_natural_language_log_meal_with_two_meals_logs_both(monkeypatch):
+    """Regression test for a real bad interaction: a message describing
+    breakfast AND lunch only got breakfast logged, with the lunch (noodles,
+    broth, water, iced latte) silently dropped -- because parse_message's
+    log_meal fields used to be singular (one meal_type/items/etc slot per
+    message) instead of a list like log_expense's "expenses". Both meals
+    must now be logged from one message, and running-total calories must
+    reflect both, not just the first."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _log_meal_response(meals=[
+            {"meal_type": "Breakfast", "items": ["toast with strawberry jam", "Old Town white coffee"],
+             "calories_low": 320, "calories_high": 420, "calories_estimate": 370, "water_ml": None},
+            {"meal_type": "Lunch", "items": ["dry chilli oil dumpling noodles", "tomato pork bone broth",
+                                              "iced latte"],
+             "calories_low": 650, "calories_high": 900, "calories_estimate": 780, "water_ml": 500},
+        ])
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text=(
+        "for my breakfast: toast with strawberry jam and an old town white coffee. For lunch: dry chilli oil "
+        "dumpling noodles and some tomato pork bone broth, 500ml water and an iced latte"
+    ))
+    _run(bot.handle_text(update, FakeContext()))
+
+    reply = update.message.replies[-1]
+    assert "toast with strawberry jam" in reply
+    assert "dry chilli oil dumpling noodles" in reply, "the lunch must not be dropped"
+    assert "Logged 2 meals" in reply
+
+    logged = db.get_recent_meals(CHAT)
+    assert len(logged) == 2
+    assert {"Breakfast", "Lunch"} == {m["meal_type"] for m in logged}
+    totals = db.get_daily_meal_totals(CHAT, db.today_str())
+    assert totals["calories"] == 370 + 780
+    assert totals["water_ml"] == 500
 
 
 def test_logmeal_command_uses_extract_meal(monkeypatch):

@@ -21,10 +21,10 @@ from correction import CORRECTION_UNDO_PHRASES, LAST_CORRECTION_KEY, _handle_cor
 from finance import _balance_text, _recent_text
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
-from nutrition import _log_meal_and_reply
+from nutrition import _log_meals_and_reply
 from replies import _reply, _send_alert_if_needed
 from rundown import _rundown_reply_text
-from tasks import _log_task_and_reply, _recent_tasks_for_ai, _tasks_text
+from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
 from vitals import _log_vitals_and_reply
 
 logger = logging.getLogger(__name__)
@@ -164,7 +164,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "log_meal":
         context.chat_data.pop(PENDING_KEY, None)
-        await _log_meal_and_reply(update, chat_id, parsed)
+        meals = parsed.get("meals") or []
+        if not meals:
+            await _reply(update, chat_id, "I didn't catch what you ate -- try describing it again.")
+            return
+        await _log_meals_and_reply(update, chat_id, meals)
         return
 
     if intent == "log_workout":
@@ -182,7 +186,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "log_task":
         context.chat_data.pop(PENDING_KEY, None)
-        await _log_task_and_reply(update, chat_id, parsed)
+        tasks = parsed.get("tasks") or []
+        if not tasks:
+            await _reply(update, chat_id, "I didn't catch what to add -- try describing the to-do again.")
+            return
+        await _log_tasks_and_reply(update, chat_id, tasks)
         return
 
     if intent == "show_tasks":

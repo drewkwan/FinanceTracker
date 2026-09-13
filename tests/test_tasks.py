@@ -131,8 +131,8 @@ def test_natural_language_log_task_computes_due_date_deterministically(monkeypat
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
         return {
-            "intent": "log_task", "task_title": "call the dentist", "task_due_in_days": 1,
-            "task_due_time": None, "task_notes": None,
+            "intent": "log_task",
+            "tasks": [{"title": "call the dentist", "due_in_days": 1, "due_time": None, "notes": None}],
             "clarification_question": None, "casual_reply": None,
         }
 
@@ -151,8 +151,8 @@ def test_natural_language_log_task_with_no_due_date_leaves_due_at_null(monkeypat
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
         return {
-            "intent": "log_task", "task_title": "buy milk", "task_due_in_days": None,
-            "task_due_time": None, "task_notes": None,
+            "intent": "log_task",
+            "tasks": [{"title": "buy milk", "due_in_days": None, "due_time": None, "notes": None}],
             "clarification_question": None, "casual_reply": None,
         }
 
@@ -161,6 +161,50 @@ def test_natural_language_log_task_with_no_due_date_leaves_due_at_null(monkeypat
     _run(bot.handle_text(update, FakeContext()))
     row = db.get_open_tasks(CHAT)[0]
     assert row["due_at"] is None
+
+
+def test_natural_language_log_task_with_many_todos_logs_every_one(monkeypatch):
+    """Regression test for a real bad interaction: a message numbering 13
+    separate to-dos only produced one, title-less "to-do" entry -- because
+    parse_message's log_task fields used to be singular (one title/due_at
+    slot per message) instead of a list like log_expense's "expenses". Every
+    named to-do must now be logged, each with its own title, not merged or
+    dropped."""
+    db.get_or_create_user(CHAT)
+    titles = [
+        "Book flight from san francisco to new york",
+        "Book hotel in New York",
+        "Look at New York hotels",
+        "Send Shardul my San Francisco schedule",
+        "Message Sri about staying with him in san francisco",
+        "Message Hubert about scheduling San Francisco hangout",
+        "Reply Lana about New York sched",
+        "Message Jeremiah about visiting",
+        "Message Chris about visiting",
+        "Order Simba and Stella's stuff to Shardul's",
+        "Schedule Shelby hangout",
+        "Cancel IPPT and inform Yan",
+        "Patch remaining RMP servers and run regressions",
+    ]
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "log_task",
+            "tasks": [{"title": t, "due_in_days": None, "due_time": None, "notes": None} for t in titles],
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="Can you add the following tasks to my tasklist: ...")
+    _run(bot.handle_text(update, FakeContext()))
+
+    reply = update.message.replies[-1]
+    assert "Added 13 to-dos" in reply
+    assert "Patch remaining RMP servers and run regressions" in reply, "the last item must not be dropped"
+
+    open_titles = {r["title"] for r in db.get_open_tasks(CHAT)}
+    assert open_titles == set(titles)
 
 
 def test_addtask_command_uses_extract_task_and_computes_due_time(monkeypatch):

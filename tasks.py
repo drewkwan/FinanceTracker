@@ -69,6 +69,40 @@ async def _log_task_and_reply(update: Update, chat_id: int, data: dict):
     await _reply(update, chat_id, f"Added: {_task_line(row)}")
 
 
+async def _log_tasks_and_reply(update: Update, chat_id: int, tasks: list):
+    """Entry point for the natural-language log_task intent, which can name
+    many separate to-dos in one message (e.g. a numbered list of 13 things
+    to do) -- this used to be the real bug: parse_message's log_task fields
+    were singular (task_title/task_due_in_days/task_due_time/task_notes, one
+    slot per message), so a message listing several to-dos collapsed to a
+    single, often title-less "to-do" entry instead of logging each one.
+    ai.py now always returns a list ("tasks"), mirroring log_expense's and
+    log_meal's existing multi-item discipline.
+
+    A single task reuses _log_task_and_reply's exact wording/behavior
+    unchanged; more than one gets ONE combined reply -- each to-do on its
+    own line -- rather than a separate message per item."""
+    if len(tasks) == 1:
+        await _log_task_and_reply(update, chat_id, tasks[0])
+        return
+
+    lines = []
+    for t in tasks:
+        title = t.get("task_title") or t.get("title") or "to-do"
+        due_in_days = t.get("task_due_in_days")
+        if due_in_days is None:
+            due_in_days = t.get("due_in_days")
+        due_time = t.get("task_due_time") or t.get("due_time")
+        notes = t.get("task_notes") or t.get("notes")
+        due_at = _due_at_from_fields(due_in_days, due_time)
+        task_id = db.add_task(chat_id, title, due_at, notes)
+        row = db.get_task(chat_id, task_id)
+        lines.append(_task_line(row))
+
+    body = "\n".join(lines)
+    await _reply(update, chat_id, f"Added {len(lines)} to-dos:\n{body}")
+
+
 async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_allowed(update):
         return

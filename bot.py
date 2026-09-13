@@ -95,13 +95,14 @@ from handlers import (
     on_error,
 )
 from memory import _memory_for_ai, _memory_text, forget_cmd, memory_cmd
-from nutrition import _log_meal_and_reply, handle_photo, logmeal_cmd, recentmeals
+from nutrition import _log_meal_and_reply, _log_meals_and_reply, handle_photo, logmeal_cmd, recentmeals
 from replies import _reply, _send_alert_if_needed
 from rundown import RUNDOWN_WINDOW_DAYS, _rundown_fallback_text, _rundown_payload, _rundown_reply_text, rundown_cmd
 from summary import WEEKDAY_NAMES, summary
 from tasks import (
     _due_at_from_fields,
     _log_task_and_reply,
+    _log_tasks_and_reply,
     _recent_tasks_for_ai,
     _tasks_text,
     addtask_cmd,

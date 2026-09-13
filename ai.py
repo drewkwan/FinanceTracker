@@ -109,12 +109,12 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     "description": string, "category": one of the category list or null if unclear,
     "is_claimable": true/false/null}},
 
-  "meal_type": one of the meal type list, or null (log_meal only),
-  "meal_items": [list of individual food/drink items as short strings] or null (log_meal only),
-  "calories_low": number or null (log_meal only -- a plausible low-end estimate, not false precision),
-  "calories_high": number or null (log_meal only -- plausible high end),
-  "calories_estimate": number or null (log_meal only -- the central estimate, roughly the midpoint),
-  "water_ml": number or null (log_meal only -- ONLY for plain water, never other drinks; null if not plain water),
+  "meals": [list of one or more objects, log_meal only -- ALWAYS a list, even for a single meal]
+    each shaped: {{"meal_type": one of the meal type list, or null, "items": [list of individual food/drink
+    items as short strings], "calories_low": number or null (a plausible low-end estimate, not false
+    precision), "calories_high": number or null (plausible high end), "calories_estimate": number or null (the
+    central estimate, roughly the midpoint), "water_ml": number or null (ONLY for plain water, never other
+    drinks; null if not plain water)}},
 
   "activity": string or null (log_workout only -- e.g. "tennis", "IPPT training", "gym", "run"),
   "duration_min": number or null (log_workout only),
@@ -126,13 +126,15 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "knee_pain": number or null (log_vitals only -- a 0-10 scale, only if a pain level is actually mentioned),
   "vitals_notes": string or null (log_vitals only -- anything else worth keeping from a check-in),
 
-  "task_title": string or null (log_task only -- a short, actionable phrase for what needs doing),
-  "task_due_in_days": integer or null (log_task only -- 0 = due today, 1 = due tomorrow, 2 = due in two days,
-    etc.; null if no due date was mentioned. Extract WHICH day as a plain count of days from today; never
-    compute or output an actual calendar date yourself, that's done in code),
-  "task_due_time": string or null (log_task only -- "HH:MM" 24-hour time ONLY if a specific clock time was
-    mentioned alongside the date, e.g. "by 5pm friday" -> "17:00"; null otherwise),
-  "task_notes": string or null (log_task only -- any extra detail worth keeping beyond the title),
+  "tasks": [list of one or more objects, log_task only -- ALWAYS a list, even for a single to-do, and however
+    many distinct to-dos are named in the message -- a numbered/bulleted list of 13 items means 13 objects, not
+    one] each shaped: {{"title": short actionable phrase for what needs doing, "due_in_days": integer or null
+    (0 = due today, 1 = due tomorrow, 2 = due in two days, etc.; null if no due date was mentioned for THIS
+    item -- other items in the same list may have their own different due dates. Extract WHICH day as a plain
+    count of days from today; never compute or output an actual calendar date yourself, that's done in code),
+    "due_time": "HH:MM" 24-hour time or null (ONLY if a specific clock time was mentioned alongside this item's
+    date, e.g. "by 5pm friday" -> "17:00"), "notes": string or null (any extra detail worth keeping beyond the
+    title)}},
 
   "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" or null (correction only -- which
     recent-<domain> list target_expense_id refers to; null means "expense", for backward compatibility),
@@ -168,11 +170,16 @@ Deciding the intent:
   purchase mentioned as its own object in "expenses", even when there's only one -- it's always a list. Don't
   stop at the first one if the message clearly describes several.
 - "log_meal": the message is reporting food or drink just consumed (e.g. "coke zero and 750ml water", "had a
-  mango", "dinner was rice, chicken and veg"). Estimate calories the way an attentive nutrition-tracking
-  assistant would -- a plausible range (calories_low/calories_high) plus a central calories_estimate, not a
-  single falsely-precise number. Break the description into individual items in meal_items. Set water_ml only
-  when plain water is explicitly mentioned (e.g. "750ml water") -- never estimate it for other drinks, and
-  leave it null if no water is mentioned at all.
+  mango", "dinner was rice, chicken and veg", "for breakfast: toast and coffee. For lunch: noodles and a latte"
+  -- two separate meals in one message). Put EVERY distinct meal mentioned as its own object in "meals", even
+  when there's only one -- it's always a list. Don't stop at the first meal, and don't fold a second meal's
+  items into the first one's, if the message clearly describes more than one (e.g. a breakfast-and-lunch
+  message must produce two objects, not one with the lunch silently dropped). Estimate calories per meal the
+  way an attentive nutrition-tracking assistant would -- a plausible range (calories_low/calories_high) plus a
+  central calories_estimate, not a single falsely-precise number. Break each meal's own description into
+  individual items in its "items" list. Set water_ml only when plain water is explicitly mentioned for that
+  meal (e.g. "750ml water") -- never estimate it for other drinks, and leave it null if no water is mentioned;
+  a plain-water (or other drink) mention with no specific meal slot is still its own object (meal_type null).
 - "log_workout": the message is reporting a workout/training session just done (e.g. "played tennis for an
   hour", "did IPPT training, ran 2.4km in 10:45", "gym, legs day"). Extract activity, duration_min and
   distance_km when mentioned; put anything else worth keeping (sets, how it felt, a split time) in
@@ -182,12 +189,17 @@ Deciding the intent:
   never guess a value that wasn't given. This is distinct from log_workout -- a message can report vitals
   only, a workout only, or both (if it clearly reports both, prefer whichever is more specific/detailed and
   let the other be logged in a follow-up message rather than guessing at fields for the one you skip).
-- "log_task": the message is describing a new to-do/reminder to track -- a one-off actionable item, optionally
-  with a deadline (e.g. "remind me to call the dentist tomorrow", "add buy milk to my list", "need to submit
-  the report by friday 5pm", "todo: renew my passport"). Extract task_title as a short, actionable phrase (not
-  a full sentence), task_due_in_days/task_due_time only if a due date/time was actually mentioned (never invent
-  one), and task_notes for any extra detail worth keeping. This is distinct from "remember" -- "remember" is
-  for standing durable facts/goals/preferences with no deadline; "log_task" is for a concrete thing to be done
+- "log_task": the message is describing one or more new to-dos/reminders to track -- a one-off actionable item,
+  optionally with a deadline (e.g. "remind me to call the dentist tomorrow", "add buy milk to my list", "need
+  to submit the report by friday 5pm", "todo: renew my passport", or a numbered/bulleted list naming several
+  separate to-dos in one message). Put EVERY distinct to-do mentioned as its own object in "tasks", even when
+  there's only one -- it's always a list. Don't stop partway through a list and don't merge several items into
+  one -- a message naming 13 separate to-dos must produce 13 objects, each with its own title (and its own due
+  date/time if one was given for that specific item), not one generic entry. Extract each title as a short,
+  actionable phrase (not a full sentence), due_in_days/due_time only if a due date/time was actually mentioned
+  for that item (never invent one), and notes for any extra detail worth keeping. This is distinct from
+  "remember" -- "remember" is for standing durable facts/goals/preferences with no deadline; "log_task" is for
+  one or more concrete things to be done
   and then checked off.
 - "correction": the message is about something ALREADY logged, in ANY of the four domains -- fixing the
   currency/amount/description/category/date of a past entry, marking/deleting a to-do, or asking to delete a
@@ -295,22 +307,28 @@ Rules for log_expense fields (apply per item in "expenses"):
 - Keep clarification_question short and conversational, and only ask about ONE thing at a time (prioritize:
   amount > claimable > category > correction target).
 
-Rules for log_meal fields:
+Rules for log_meal fields (apply per item in "meals"):
 - Give your best reasonable estimate even from a short description -- never refuse to estimate just because
   detail is limited; a wider low/high range is the right response to uncertainty, not a clarifying question.
   Only use "clarification" for log_meal if the message is too vague to identify what was even eaten/drunk at
   all (e.g. just "logged food").
-- calories_low/calories_high/calories_estimate should always be set together for a log_meal -- never leave
+- calories_low/calories_high/calories_estimate should always be set together for each meal -- never leave
   calories_estimate null while giving a range, or vice versa.
+- Don't merge distinct meals into one object just because they're in the same message, and don't stop after
+  the first one -- see the "log_meal" intent rule above: every meal named gets its own object in "meals".
 
-Rules for log_task fields:
-- task_title should be a short, actionable phrase capturing what needs doing (e.g. "call the dentist", "submit
+Rules for log_task fields (apply per item in "tasks"):
+- title should be a short, actionable phrase capturing what needs doing (e.g. "call the dentist", "submit
   the report"), not a full restated sentence.
-- task_due_in_days is a plain count of days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) -- unlike
+- due_in_days is a plain count of days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) -- unlike
   days_ago there's no cap, since due dates can be far in the future. Leave it null if no due date was
-  mentioned; never invent one.
-- task_due_time is only set if a specific clock time was mentioned alongside the date (e.g. "by 5pm friday" ->
-  "17:00"); leave it null otherwise, even if a due date was given.
+  mentioned for that item; never invent one.
+- due_time is only set if a specific clock time was mentioned alongside that item's date (e.g. "by 5pm friday"
+  -> "17:00"); leave it null otherwise, even if a due date was given.
+- A numbered or bulleted list of to-dos in one message (e.g. 13 lines, one to-do per line) must become 13
+  objects in "tasks" -- one per line -- never collapsed into a single item or truncated partway through the
+  list. Each line's own wording (a name, a timeframe like "tonight"/"this week") stays with that line's object
+  only; don't let one line's due date leak onto another's.
 
 Rules for remember/forget fields:
 - memory_content should read as a standalone fact -- someone reading only that content later, with no other
@@ -372,7 +390,12 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
         client = _get_client()
         resp = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=450,
+            # 450 was enough for a single expense/meal/task, but expenses/meals/tasks are
+            # now always lists -- a message naming a dozen-plus separate to-dos (a real
+            # observed failure: 13 to-dos in one message only produced one, title-less
+            # entry) needs real room to emit that many objects without truncating into
+            # invalid JSON and silently falling back to a single generic item.
+            max_tokens=1500,
             system=PARSE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -685,12 +708,7 @@ def _clarify_fallback(message: str) -> dict:
     return {
         "intent": "clarification",
         "expenses": None,
-        "meal_type": None,
-        "meal_items": None,
-        "calories_low": None,
-        "calories_high": None,
-        "calories_estimate": None,
-        "water_ml": None,
+        "meals": None,
         "activity": None,
         "duration_min": None,
         "distance_km": None,
@@ -699,10 +717,7 @@ def _clarify_fallback(message: str) -> dict:
         "sleep_hours": None,
         "knee_pain": None,
         "vitals_notes": None,
-        "task_title": None,
-        "task_due_in_days": None,
-        "task_due_time": None,
-        "task_notes": None,
+        "tasks": None,
         "target_domain": None,
         "target_expense_id": None,
         "correction_action": None,

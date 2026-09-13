@@ -32,6 +32,42 @@ async def _log_meal_and_reply(update: Update, chat_id: int, data: dict):
     )
 
 
+async def _log_meals_and_reply(update: Update, chat_id: int, meals: list):
+    """Entry point for the natural-language log_meal intent, which can name
+    more than one meal in a single message (e.g. "for breakfast: toast and
+    coffee. For lunch: noodles and a latte") -- this used to be the real bug:
+    parse_message only had room for ONE meal's fields, so a second meal
+    mentioned in the same message was silently dropped rather than logged.
+    ai.py now always returns a list ("meals"), mirroring log_expense's
+    existing multi-item discipline.
+
+    A single meal reuses _log_meal_and_reply's exact wording/behavior
+    unchanged (same reply shape existing callers/tests expect); more than
+    one meal gets ONE combined reply -- each meal on its own line -- plus a
+    single running total, rather than a separate message per meal."""
+    if len(meals) == 1:
+        await _log_meal_and_reply(update, chat_id, meals[0])
+        return
+
+    lines = []
+    for m in meals:
+        meal_id = db.add_meal(
+            chat_id, m.get("meal_type"), m.get("items") or m.get("meal_items"),
+            m.get("calories_low"), m.get("calories_high"), m.get("calories_estimate"),
+            water_ml=m.get("water_ml"),
+        )
+        row = db.get_meal(chat_id, meal_id)
+        items = ", ".join(row["items"]) or "meal"
+        water_tag = f", +{row['water_ml']:.0f}ml water" if row.get("water_ml") else ""
+        lines.append(f"{items} -- {_calorie_range(row)}{water_tag}")
+
+    body = "\n".join(f"- {ln}" for ln in lines)
+    await _reply(
+        update, chat_id,
+        f"Logged {len(lines)} meals:\n{body}\n\n{_daily_meal_totals_text(chat_id)}"
+    )
+
+
 async def logmeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_allowed(update):
         return

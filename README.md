@@ -63,6 +63,11 @@ natural-language pattern.
   never estimated for other drinks.
 - Every meal/photo reply includes the day's running calorie (and water, if
   any) total, not just the item just logged.
+- **More than one meal in a single message is logged as separate meals**,
+  not merged or dropped. "For breakfast: toast and coffee. For lunch:
+  noodles and a latte" logs two entries (breakfast and lunch, each with its
+  own calorie range) and replies with both, the same way "$5 for lunch and
+  $5 for coffee" logs two separate expenses instead of one.
 - **Workouts** (`/logworkout` or natural language, e.g. "played tennis for an
   hour, won 2 sets") capture activity, duration, distance when mentioned, and
   free-text notes for anything else worth keeping (splits, sets, how it felt)
@@ -131,6 +136,10 @@ last week.
   the dentist tomorrow 5pm", "add buy milk to my list", "need to submit the
   report by friday". A due date/time is only set if you actually mention one;
   otherwise the to-do just sits on the list with no deadline.
+- **A whole list of to-dos in one message is added as separate to-dos**, not
+  merged or dropped. A numbered list of 13 different things to do logs 13
+  to-dos, each with its own title and (if mentioned) its own due date, the
+  same way "$5 for lunch and $5 for coffee" logs two separate expenses.
 - **Due dates are computed in code, never guessed by Claude** — same
   discipline as expense date corrections. The model only ever extracts *how
   many days from today* (and a clock time, if one was mentioned); Morrow
