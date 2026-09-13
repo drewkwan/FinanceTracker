@@ -6,11 +6,14 @@ Corrections and undo, for every domain. Two shapes coexist here on purpose:
 - Meal/workout/vitals/task corrections are intentionally narrower. Each
   domain declares its own "actions" allowlist in _DOMAIN_OPS instead of
   sharing one global set, specifically so a domain-specific restriction
-  (e.g. tasks support mark_done+delete but not edit_date, since a
+  (e.g. tasks support mark_done/edit_due/delete but not edit_date -- a
   forward-looking due date can't reuse days_ago's backward-only
-  "today - N days" math) is enforced here in code, not just in the prompt.
-  _handle_simple_domain_correction is the one implementation all four of
-  those domains share.
+  "today - N days" math, so it gets its own due_in_days/due_time fields
+  instead, the same forward-looking shape log_task already uses) is
+  enforced here in code, not just in the prompt. _handle_simple_domain_correction
+  is the one implementation all four of those domains share.
+- "balance" is a fifth, even narrower shape: a single per-chat running
+  number, not a row with an id -- see _handle_balance_adjustment.
 
 Every confirmation message here is built from real values just read back
 from the database -- never from AI-generated text -- so the bot can never
@@ -49,11 +52,17 @@ CORRECTION_ACTIONS = {
 # Registry for the non-expense domains, which all share a narrower
 # correction surface than expenses (see _handle_simple_domain_correction).
 # Each domain declares its own "actions" allowlist -- meal/workout/vitals
-# support edit_date + delete; task supports mark_done + delete instead,
-# since a forward-looking due date can't reuse days_ago's backward-only
-# "today - N days" math (see ai.py's PARSE_SYSTEM_PROMPT correction rules).
+# support edit_date + delete; task supports mark_done + edit_task + delete
+# instead of edit_date. edit_task is deliberately one flexible action
+# rather than one per field (edit_title/edit_due/edit_notes) -- a to-do has
+# few enough fields that a single correction commonly touches more than one
+# at once (e.g. "push #11 to tomorrow, I need Shardul's address" reschedules
+# AND adds a note), and its due date is forward-looking (due_in_days/
+# due_time, the same shape log_task already extracts for a new to-do) since
+# it can't reuse edit_date's backward-only days_ago math (see ai.py's
+# PARSE_SYSTEM_PROMPT correction rules).
 SIMPLE_DOMAIN_ACTIONS = {"edit_date", "delete"}
-TASK_DOMAIN_ACTIONS = {"mark_done", "delete"}
+TASK_DOMAIN_ACTIONS = {"mark_done", "edit_task", "delete"}
 
 _DOMAIN_OPS = {
     "meal": {"noun": "meal", "recent_cmd": "/recentmeals", "date_field": "meal_date",
@@ -69,9 +78,11 @@ _DOMAIN_OPS = {
                 "get": db.get_vitals, "edit_date": db.edit_vitals_date, "delete": db.delete_vitals,
                 "restore": db.restore_deleted_vitals, "line": _vitals_line},
     "task": {"noun": "to-do", "recent_cmd": "/tasks",
-              "actions": TASK_DOMAIN_ACTIONS, "actions_desc": "only marking one done or deleting one",
+              "actions": TASK_DOMAIN_ACTIONS,
+              "actions_desc": "only marking one done, editing its title/due date/notes, or deleting one",
               "get": db.get_task, "delete": db.delete_task, "restore": db.restore_deleted_task,
-              "line": _task_line, "mark_done": db.mark_task_done, "unmark_done": db.unmark_task_done},
+              "line": _task_line, "mark_done": db.mark_task_done, "unmark_done": db.unmark_task_done,
+              "edit_task": db.edit_task},
 }
 
 
@@ -123,6 +134,58 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
         )
         return
 
+    if action == "edit_task":
+        # One flexible action rather than one per field -- title, due date,
+        # and notes can each change independently, in whatever combination
+        # the message actually implies (e.g. "push #11 to tomorrow, I need
+        # Shardul's address" reschedules AND adds a note in one correction).
+        # A due date is forward-looking (due_in_days/due_time), unlike
+        # edit_date's backward-only days_ago -- "in 3 days" can't be
+        # expressed as "N days ago".
+        new_title = parsed.get("new_description")
+        new_notes = parsed.get("new_task_notes")
+        due_in_days = parsed.get("due_in_days")
+        new_due_at = None
+        if isinstance(due_in_days, int) and due_in_days >= 0:
+            due_time = parsed.get("due_time")
+            today = date.fromisoformat(db.today_str())
+            due_date = today + timedelta(days=due_in_days)
+            new_due_at = f"{due_date.isoformat()} {due_time}" if due_time else due_date.isoformat()
+
+        if new_title is None and new_notes is None and new_due_at is None:
+            await _reply(
+                update, chat_id,
+                f"What should I change about that {noun} -- the title, the due date, or a note?"
+            )
+            return
+
+        # Only pass fields actually changing -- db.edit_task's _UNSET default
+        # leaves everything else untouched (see its docstring for why that's
+        # not the same as passing None, which explicitly clears a field).
+        edits = {}
+        if new_title is not None:
+            edits["new_title"] = new_title
+        if new_due_at is not None:
+            edits["new_due_at"] = new_due_at
+        if new_notes is not None:
+            edits["new_notes"] = new_notes
+
+        old_title, old_due_at, old_notes = row["title"], row["due_at"], row["notes"]
+        updated = ops["edit_task"](chat_id, target_id, **edits)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "edit_task", "expense_id": target_id,
+            "old_title": old_title, "old_due_at": old_due_at, "old_notes": old_notes,
+        }
+        bits = []
+        if new_title is not None:
+            bits.append(f"now titled \"{updated['title']}\"")
+        if new_due_at is not None:
+            bits.append(f"due {updated['due_at']}")
+        if new_notes is not None:
+            bits.append("notes updated")
+        await _reply(update, chat_id, f"Updated -- {', '.join(bits)}. Reply 'undo' if that's wrong.")
+        return
+
     if action == "mark_done":
         updated = ops["mark_done"](chat_id, target_id)
         context.chat_data[LAST_CORRECTION_KEY] = {
@@ -136,6 +199,34 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
         context.chat_data[LAST_CORRECTION_KEY] = {"domain": domain, "action": "delete", "row": deleted}
         await _reply(update, chat_id, f"Deleted: {ops['line'](deleted)}. Reply 'undo' if that's wrong.")
         return
+
+
+async def _handle_balance_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict):
+    """"Adjust my rolled-over balance/deficit by X" -- the one natural-
+    language path onto db.adjust_balance's manual escape hatch (see its
+    docstring). Unlike every other correction here, there's no recent-item
+    list to match against -- balance is a single per-chat value, not a row
+    -- so this only needs the delta itself, taken from the user's own words,
+    never estimated or invented (same discipline as edit_amount)."""
+    chat_id = update.effective_chat.id
+    delta = parsed.get("new_amount")
+    if not isinstance(delta, (int, float)) or delta == 0:
+        await _reply(
+            update, chat_id,
+            "By how much should I adjust your rolled-over balance? (e.g. \"-1135.89\" to add that deficit, "
+            "or a positive number to add a credit)"
+        )
+        return
+    result = db.adjust_balance(chat_id, float(delta))
+    context.chat_data[LAST_CORRECTION_KEY] = {
+        "domain": "balance", "action": "adjust_balance", "old_balance": result["old_balance"],
+    }
+    sign = "+" if delta >= 0 else ""
+    await _reply(
+        update, chat_id,
+        f"Balance adjusted by {sign}{_money(delta)}: {_money(result['old_balance'])} -> "
+        f"{_money(result['new_balance'])}. Reply 'undo' if that's wrong."
+    )
 
 
 async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict,
@@ -164,6 +255,10 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if domain == "task":
         await _handle_simple_domain_correction(update, context, parsed, "task", recent_task_ids)
+        return
+
+    if domain == "balance":
+        await _handle_balance_adjustment(update, context, parsed)
         return
 
     if target_id not in recent_ids or action not in CORRECTION_ACTIONS:
@@ -309,6 +404,11 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
             await _reply(update, chat_id, f"Restored: {_memory_line(restored)}")
         return True
 
+    if domain == "balance":
+        db.set_balance(chat_id, snap["old_balance"])
+        await _reply(update, chat_id, f"Reverted -- balance is back to {_money(snap['old_balance'])}.")
+        return True
+
     if domain in _DOMAIN_OPS:
         # meal/workout/vitals/task all share the same narrow revert shape --
         # see _handle_simple_domain_correction for why their correction
@@ -323,6 +423,15 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
         elif action == "mark_done":
             row = ops["unmark_done"](chat_id, snap["expense_id"])
             await _reply(update, chat_id, f"Reverted -- back to open: {ops['line'](row)}")
+        elif action == "edit_task":
+            # Always pass all three explicitly, even where a value is None
+            # (e.g. it had no due date before) -- db.edit_task's _UNSET
+            # default is for "don't touch", not for these real prior values,
+            # so a real None here correctly clears the field back to no-date/
+            # no-notes rather than leaving whatever the edit just set.
+            row = ops["edit_task"](chat_id, snap["expense_id"], new_title=snap["old_title"],
+                                    new_due_at=snap["old_due_at"], new_notes=snap["old_notes"])
+            await _reply(update, chat_id, f"Reverted -- back to \"{row['title']}\".")
         return True
 
     if action == "delete":

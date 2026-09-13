@@ -251,3 +251,252 @@ def test_correction_can_target_by_date_reference_alone(monkeypatch):
     updated = db.get_expense(CHAT, target["id"])
     assert updated["expense_date"] == (dt.date.today() - dt.timedelta(days=2)).isoformat()
     assert "now dated" in update.message.replies[-1]
+
+
+def _no_op_correction_fields():
+    # Deliberately omits "new_amount" -- some callers below set it explicitly
+    # (e.g. the balance-adjustment tests), and spreading a "new_amount": None
+    # from this helper AFTER that explicit value in the same dict literal
+    # would silently overwrite it back to None (dict literals apply keys
+    # left-to-right, later wins) -- a real bug caught while writing these
+    # tests, not just a hypothetical one.
+    return {
+        "expenses": None,
+        "new_currency": None, "new_description": None, "new_category": None,
+    }
+
+
+def test_correction_can_manually_adjust_rolled_over_balance(monkeypatch):
+    """Regression test for a real interaction: after losing expense history,
+    the automatic rollover has nothing to derive the real deficit from, and
+    there was no way to correct 'balance' itself -- only individual expenses.
+    target_domain="balance" is a different shape from every other
+    correction: no recent-item list, just a signed delta applied to the one
+    running balance number."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "correction", "target_domain": "balance", "target_expense_id": None,
+            "correction_action": "adjust_balance", "new_amount": -1135.89, "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+            **_no_op_correction_fields(),
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "add this amount to my rolled over deficit -SGD 1,135.89")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_or_create_user(CHAT)["balance"] == -1135.89
+    assert "-1,135.89" in update.message.replies[-1] or "1,135.89" in update.message.replies[-1]
+
+
+def test_balance_adjustment_without_an_amount_asks_for_one(monkeypatch):
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "correction", "target_domain": "balance", "target_expense_id": None,
+            "correction_action": "adjust_balance", "new_amount": None, "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+            **_no_op_correction_fields(),
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "adjust my rolled-over balance")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0  # untouched
+    assert "how much" in update.message.replies[-1].lower()
+
+
+def test_undo_reverts_a_balance_adjustment(monkeypatch):
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "correction", "target_domain": "balance", "target_expense_id": None,
+            "correction_action": "adjust_balance", "new_amount": -1135.89, "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+            **_no_op_correction_fields(),
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    adjust_update = FakeUpdate(CHAT, "adjust my rolled-over balance by -1135.89")
+    _run(bot.handle_text(adjust_update, context))
+    assert db.get_or_create_user(CHAT)["balance"] == -1135.89
+
+    undo_update = FakeUpdate(CHAT, "undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+
+
+def _edit_task_response(task_id, **overrides):
+    base = {
+        "intent": "correction", "target_domain": "task", "target_expense_id": task_id,
+        "correction_action": "edit_task", "due_in_days": None, "due_time": None,
+        "new_task_notes": None, "days_ago": None,
+        "clarification_question": None, "casual_reply": None,
+        **_no_op_correction_fields(),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_correction_can_reschedule_a_task_due_date(monkeypatch):
+    """Regression test for a real user request: 'push #11 to tomorrow' was
+    rejected outright because task corrections only supported mark_done and
+    delete. edit_task adds forward-looking rescheduling using the same
+    due_in_days/due_time shape log_task already extracts for new to-dos."""
+    import datetime as dt
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "Order Simba and Stella's stuff to Shardul's",
+                           due_at=dt.date.today().isoformat())
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id, due_in_days=1)
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "push 11 to tomorrow")
+    _run(bot.handle_text(update, FakeContext()))
+    updated = db.get_task(CHAT, task_id)
+    assert updated["due_at"] == (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    assert "due" in update.message.replies[-1]
+
+
+def test_correction_can_edit_a_task_title(monkeypatch):
+    """The user's actual ask: not just the due date, editing the to-do
+    itself. new_description (reused from expense's edit_description) is the
+    corrected title here; the due date and notes stay untouched."""
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "call the dentist")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id, new_description="call the vet")
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "actually that's calling the vet, not the dentist")
+    _run(bot.handle_text(update, FakeContext()))
+    updated = db.get_task(CHAT, task_id)
+    assert updated["title"] == "call the vet"
+    assert "now titled" in update.message.replies[-1]
+
+
+def test_correction_can_reschedule_and_add_a_note_in_one_edit(monkeypatch):
+    """Regression test for the exact real message: 'push 11 to tomorrow, I
+    need Shardul's address' -- a single correction that both reschedules AND
+    adds a note. edit_task must apply both, not just whichever field looks
+    more obvious."""
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "Order Simba and Stella's stuff to Shardul's")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id, due_in_days=1, new_task_notes="need Shardul's address")
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    import datetime as dt
+    update = FakeUpdate(CHAT, "ok lets push 11 to tomorrow, i need shardul's address")
+    _run(bot.handle_text(update, FakeContext()))
+    updated = db.get_task(CHAT, task_id)
+    assert updated["due_at"] == (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    assert updated["notes"] == "need Shardul's address"
+    reply = update.message.replies[-1]
+    assert "due" in reply and "notes updated" in reply
+
+
+def test_edit_task_with_no_field_specified_asks_what_to_change(monkeypatch):
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "call the dentist")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id)
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "fix that to-do")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_task(CHAT, task_id)["title"] == "call the dentist"  # untouched
+    assert "what should i change" in update.message.replies[-1].lower()
+
+
+def test_undo_reverts_a_task_reschedule(monkeypatch):
+    import datetime as dt
+    db.get_or_create_user(CHAT)
+    today_str = dt.date.today().isoformat()
+    task_id = db.add_task(CHAT, "call the dentist", due_at=today_str)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id, due_in_days=3)
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    reschedule_update = FakeUpdate(CHAT, "move calling the dentist to in 3 days")
+    _run(bot.handle_text(reschedule_update, context))
+    assert db.get_task(CHAT, task_id)["due_at"] == (dt.date.today() + dt.timedelta(days=3)).isoformat()
+
+    undo_update = FakeUpdate(CHAT, "undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_task(CHAT, task_id)["due_at"] == today_str
+
+
+def test_undo_reschedule_clears_due_date_back_to_none_if_it_was_never_set(monkeypatch):
+    """Edge case that's easy to get wrong: if the to-do originally had NO
+    due date, undoing a reschedule must clear due_at back to None -- not
+    silently leave the just-set date because None looks like 'no change'.
+    (db.edit_task's _UNSET sentinel exists specifically so revert can tell
+    the difference between "don't touch this field" and "set it back to
+    None".)"""
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "buy milk")  # no due_at at all
+    assert db.get_task(CHAT, task_id)["due_at"] is None
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return _edit_task_response(task_id, due_in_days=2)
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    update = FakeUpdate(CHAT, "actually buying milk is due in 2 days")
+    _run(bot.handle_text(update, context))
+    assert db.get_task(CHAT, task_id)["due_at"] is not None
+
+    undo_update = FakeUpdate(CHAT, "undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_task(CHAT, task_id)["due_at"] is None
+
+
+class _FakeCmdContext:
+    """Minimal stand-in for the /adjustbalance command path -- just needs
+    .args (like every other slash command) and .chat_data (for the undo
+    snapshot), not the full natural-language FakeContext shape."""
+    def __init__(self, args):
+        self.args = args
+        self.chat_data = {}
+
+
+def test_adjustbalance_command_applies_delta_and_supports_undo():
+    db.get_or_create_user(CHAT)
+    context = _FakeCmdContext(["-1135.89"])
+    update = FakeUpdate(CHAT, "/adjustbalance -1135.89")
+    _run(bot.adjustbalance_cmd(update, context))
+    assert db.get_or_create_user(CHAT)["balance"] == -1135.89
+    assert "1,135.89" in update.message.replies[-1]
+
+    undo_update = FakeUpdate(CHAT, "undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+
+
+def test_adjustbalance_command_rejects_non_numeric_input():
+    db.get_or_create_user(CHAT)
+    context = _FakeCmdContext(["oops"])
+    update = FakeUpdate(CHAT, "/adjustbalance oops")
+    _run(bot.adjustbalance_cmd(update, context))
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+    assert "doesn't look like a number" in update.message.replies[-1]

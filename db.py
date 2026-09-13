@@ -47,6 +47,14 @@ Design (see README for the full explanation):
 Rollover math (matches the spec exactly):
   Day 1: target=$100, spend $30 -> leftover = $100 - $30 = $70 -> balance += 70
   Day 2: available = target($100) + balance($70) = $170
+
+`balance` is always derived from `expenses` -- there's deliberately no
+"just set it to X" path in the normal flow, so it can never silently drift
+from what was actually logged. adjust_balance is the one escape hatch, for
+when the derivation itself can't be trusted (lost history from before a
+given date), and it's a nudge (+/- delta) rather than an absolute set, so
+it's always visible in the reply/undo trail rather than a value replaced
+outright.
 """
 
 import json
@@ -288,6 +296,37 @@ def get_status(chat_id: int) -> dict:
         "current_streak": user["current_streak"],
         "best_streak": user["best_streak"],
     }
+
+
+def adjust_balance(chat_id: int, delta: float) -> dict:
+    """Manually nudges the rolling `balance` by `delta` (negative = adding a
+    deficit, positive = adding a credit) -- the one supported way to correct
+    balance drift that the automatic day-by-day rollover can't reconstruct on
+    its own (see ensure_rollover's docstring: it derives each day's leftover
+    entirely from that day's rows in `expenses`, so if expense history from
+    before some date is gone -- e.g. lost to a redeploy without persistent
+    storage -- those days silently roll over as if $0 was spent, which is
+    the opposite of a real deficit). The amount always comes from the user
+    literally, never invented or estimated by the model, the same "real
+    numbers only" discipline as edit_amount. Calls ensure_rollover first so
+    the adjustment lands on an up-to-date balance rather than a stale one.
+    Returns {"old_balance": ..., "new_balance": ...}."""
+    ensure_rollover(chat_id)
+    user = get_or_create_user(chat_id)
+    old_balance = user["balance"]
+    new_balance = old_balance + delta
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET balance = ? WHERE chat_id = ?", (new_balance, chat_id))
+    return {"old_balance": old_balance, "new_balance": new_balance}
+
+
+def set_balance(chat_id: int, balance: float) -> None:
+    """Only used to revert a prior adjust_balance -- restores the exact
+    pre-adjustment value from the undo snapshot rather than recomputing
+    anything, the same "replay the snapshot" discipline as every other
+    domain's undo."""
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET balance = ? WHERE chat_id = ?", (balance, chat_id))
 
 
 def maybe_alert(chat_id: int) -> bool:
@@ -1021,6 +1060,39 @@ def edit_task_due(chat_id: int, task_id: int, new_due_at: str | None) -> dict | 
     with get_conn() as conn:
         conn.execute(
             "UPDATE tasks SET due_at = ? WHERE id = ? AND chat_id = ?", (new_due_at, task_id, chat_id)
+        )
+    return get_task(chat_id, task_id)
+
+
+# Distinct from None -- a to-do's due_at/notes are legitimately nullable, so
+# None is a real value ("clear this field") that edit_task must be able to
+# set on purpose (e.g. undoing an edit that added a due date to a task that
+# previously had none). _UNSET is the "caller didn't mention this field at
+# all" default instead, the same "only touches what's passed" discipline as
+# edit_expense, but edit_expense never needs to null out amount/description/
+# category, so it never ran into this -- a task's due date and notes both
+# can legitimately go back to "nothing" on revert.
+_UNSET = object()
+
+
+def edit_task(chat_id: int, task_id: int, new_title=_UNSET, new_due_at=_UNSET, new_notes=_UNSET) -> dict | None:
+    """General to-do editor -- title, due date, and notes can each change
+    independently in one call, whichever combination the correction
+    actually implies (e.g. "push #11 to tomorrow, I need Shardul's address"
+    reschedules AND adds a note in one shot). Pass a real value (including
+    None) for a field to change it; omit a field entirely to leave it
+    untouched -- see _UNSET's docstring for why that's not the same as
+    passing None."""
+    row = get_task(chat_id, task_id)
+    if row is None:
+        return None
+    final_title = row["title"] if new_title is _UNSET else new_title
+    final_due_at = row["due_at"] if new_due_at is _UNSET else new_due_at
+    final_notes = row["notes"] if new_notes is _UNSET else new_notes
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET title = ?, due_at = ?, notes = ? WHERE id = ? AND chat_id = ?",
+            (final_title, final_due_at, final_notes, task_id, chat_id),
         )
     return get_task(chat_id, task_id)
 

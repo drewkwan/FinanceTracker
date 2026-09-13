@@ -1,7 +1,8 @@
 """
 Expense tracking: /log, /claim, /claimed, /balance, /recent, /undo,
-/delete, /edit, /settarget. The original domain this bot was built around
--- everything else follows its conventions, not the other way around.
+/delete, /edit, /settarget, /adjustbalance. The original domain this bot was
+built around -- everything else follows its conventions, not the other way
+around.
 """
 
 from telegram import Update
@@ -11,6 +12,7 @@ import ai
 import db
 import fx
 from access import _reject_if_not_allowed
+from correction import LAST_CORRECTION_KEY
 from formatting import _expense_line, _money, _status_text
 from replies import _send_alert_if_needed
 
@@ -31,6 +33,41 @@ async def settarget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = db.get_status(chat_id)
     await update.message.reply_text(
         f"Daily target set to {_money(amount)}.\n\n{_status_text(status)}"
+    )
+
+
+async def adjustbalance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The one supported way to manually correct rolled-over balance/deficit
+    drift -- see db.adjust_balance's docstring for when this is actually
+    needed (lost expense history from before some date, so the automatic
+    day-by-day rollover has nothing to derive that period's deficit from).
+    A delta, not an absolute value -- /adjustbalance -1135.89 ADDS a
+    1135.89 deficit to whatever balance already is, it doesn't set balance
+    to -1135.89."""
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /adjustbalance <delta> -- e.g. /adjustbalance -1135.89 to add that deficit, "
+            "or /adjustbalance 50 to add a credit. This ADDS to your current rolled-over balance, "
+            "it doesn't replace it."
+        )
+        return
+    try:
+        delta = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("That doesn't look like a number. Try: /adjustbalance -1135.89")
+        return
+    result = db.adjust_balance(chat_id, delta)
+    context.chat_data[LAST_CORRECTION_KEY] = {
+        "domain": "balance", "action": "adjust_balance", "old_balance": result["old_balance"],
+    }
+    status = db.get_status(chat_id)
+    sign = "+" if delta >= 0 else ""
+    await update.message.reply_text(
+        f"Balance adjusted by {sign}{_money(delta)}: {_money(result['old_balance'])} -> "
+        f"{_money(result['new_balance'])}.\n\n{_status_text(status)}\n\nReply 'undo' if that's wrong."
     )
 
 

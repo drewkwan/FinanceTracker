@@ -68,6 +68,7 @@ COMMAND_LIST = (
     "/summary [today|week|month] (spending breakdown + trends over a period), "
     "/recent [n] (last n logged expenses with their IDs), /undo (remove the most recent expense), "
     "/edit <id> <amount> [description] (fix a mislogged expense), /delete <id> (remove by ID), "
+    "/adjustbalance <delta> (manually nudge rolled-over balance by a signed delta, e.g. for lost history), "
     "/logmeal <description> (log food/drink; a photo works too, sent directly with no command), "
     "/recentmeals [n] (last n logged meals), "
     "/logworkout <description> (log a workout), /recentworkouts [n] (last n logged workouts), "
@@ -136,16 +137,32 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     date, e.g. "by 5pm friday" -> "17:00"), "notes": string or null (any extra detail worth keeping beyond the
     title)}},
 
-  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" or null (correction only -- which
-    recent-<domain> list target_expense_id refers to; null means "expense", for backward compatibility),
-  "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain> list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" or null (correction only),
+  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" | "balance" or null (correction only --
+    which recent-<domain> list target_expense_id refers to; null means "expense", for backward compatibility;
+    "balance" is different from the rest -- see below and the adjust_balance rule),
+  "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
+    list; not applicable/always null for target_domain="balance", which has no recent-item list),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "adjust_balance" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back; never compute or output an
     actual calendar date yourself, that's done in code),
+  "due_in_days": integer or null (correction + edit_task only, target_domain="task", ONLY set if the message
+    actually changes the due date -- 0 = due today, 1 = due tomorrow, 2 = due in two days, etc.; forward-
+    looking, the opposite direction from days_ago, and unlike days_ago there's no 14-day cap since due dates
+    can be far in the future. Extract WHICH day as a plain count of days from today; never compute or output
+    an actual calendar date yourself, that's done in code),
+  "due_time": string or null (correction + edit_task only -- "HH:MM" 24-hour time ONLY if a specific clock time
+    was mentioned alongside the new date, e.g. "push it to 5pm tomorrow" -> "17:00"; null otherwise),
   "new_currency": one of the currency list or null (correction + edit_currency only),
-  "new_amount": number or null (correction + edit_amount only),
-  "new_description": string or null (correction + edit_description only),
+  "new_amount": number or null (correction + edit_amount only -- the item's corrected total; correction +
+    adjust_balance only -- a DELTA to add to the current rolled-over balance, not a replacement value; may be
+    negative for a deficit),
+  "new_task_notes": string or null (correction + edit_task only, target_domain="task" -- ONLY set if the
+    message actually adds/changes a note on the to-do, e.g. "I need Shardul's address for that" alongside a
+    reschedule),
+  "new_description": string or null (correction + edit_description only, target_domain="expense"; ALSO reused
+    for correction + edit_task, target_domain="task" -- the to-do's corrected title, ONLY set if the message
+    actually changes the title itself, not just its due date or notes),
   "new_category": one of the category list or null (correction + edit_category only),
 
   "memory_label": string or null (remember + forget only -- a short 2-4 word label, e.g. "Tuesday gym plan";
@@ -206,23 +223,48 @@ Deciding the intent:
   duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
   logged my lunch", "delete that", "actually it was $50 not $15", "that log from yesterday was wrong, tag it to
   the day before instead", "delete that meal, I logged it twice", "mark the dentist call as done", "I finished
-  that", "delete that task, never mind"). First decide target_domain from context (an amount/currency strongly
-  implies "expense"; food/calories implies "meal"; a workout activity implies "workout"; a to-do title/deadline
-  implies "task" -- when genuinely ambiguous between domains, prefer whichever domain has an item matching the
-  description/date, and if more than one domain plausibly matches, use "clarification" instead). Then identify
-  the ONE matching item in that domain's recent list -- match on whatever the message gives you: amount/
-  description, OR just a date/day reference alone (e.g. "yesterday's log", "the one from Monday") is enough on
-  its own if exactly one recent item in that domain has that date, even with no amount or description
-  mentioned. Set target_expense_id to its "id". Only "expense" targets support edit_currency/edit_amount/
-  edit_description/edit_category -- for "meal" or "workout" targets, only "edit_date" and "delete" are
-  supported right now; for "task" targets, only "mark_done" and "delete" are supported right now (rescheduling
-  a due date isn't supported yet). If the user wants some other field fixed on a meal/workout/task, use
-  "clarification" and say only those specific corrections work for that domain right now. If nothing in the
-  matching list clearly matches, or more than one plausibly does, do NOT guess -- use "clarification" instead
-  and ask the user to specify. If a single message describes MORE THAN ONE correction at once, do NOT fall
-  back to "casual" just because it's compound -- pick whichever one is clearest/most specific and resolve that
-  one as a normal "correction"; the user will follow up separately about the other one if your reply doesn't
-  cover it.
+  that", "delete that task, never mind") -- OR about the rolled-over balance/deficit itself rather than any one
+  logged item (target_domain="balance", see its own paragraph below). First decide target_domain from context
+  (an amount/currency strongly implies "expense"; food/calories implies "meal"; a workout activity implies
+  "workout"; a to-do title/deadline implies "task"; the words "balance", "rolled-over", or "deficit" with no
+  specific item being referenced implies "balance" -- when genuinely ambiguous between domains, prefer
+  whichever domain has an item matching the description/date, and if more than one domain plausibly matches,
+  use "clarification" instead). Then identify the ONE matching item in that domain's recent list -- match on
+  whatever the message gives you: amount/description, OR just a date/day reference alone (e.g. "yesterday's
+  log", "the one from Monday") is enough on its own if exactly one recent item in that domain has that date,
+  even with no amount or description mentioned. Set target_expense_id to its "id". Only "expense" targets
+  support edit_currency/edit_amount/edit_description/edit_category -- for "meal" or "workout" targets, only
+  "edit_date" and "delete" are supported right now; for "task" targets, "mark_done", "edit_task" (a flexible
+  title/due-date/notes edit -- see below), and "delete" are supported. If the user wants some other field fixed
+  on a meal/workout, use "clarification" and say only those specific corrections work for that domain right
+  now. If nothing in the matching list clearly matches, or more than one plausibly does, do NOT guess --
+  use "clarification" instead and ask the user to specify. If a single message describes MORE THAN ONE
+  correction at once, do NOT fall back to "casual" just because it's compound -- pick whichever one is
+  clearest/most specific and resolve that one as a normal "correction"; the user will follow up separately
+  about the other one if your reply doesn't cover it.
+  target_domain="balance" (correction_action is always "adjust_balance") is its own case, unlike every other
+  domain above: it has no recent-item list and no target_expense_id to match, because the rolled-over balance
+  is one running number per chat, not a row. Use it when the user wants to correct the balance/deficit ITSELF
+  -- typically because expense history from before some date is missing (lost/reset data), so the automatic
+  day-by-day rollover has nothing to derive that period's real deficit from (e.g. "add this to my rolled over
+  deficit -1135.89", "adjust my balance by -50", "my balance is off by 200, I actually overspent"). Put the
+  amount to add in new_amount as a signed DELTA (negative to add a deficit, positive to add a credit) -- never
+  an absolute replacement value, and never invent a number the user didn't give you. This is entirely distinct
+  from an "edit_amount" correction on one expense (which fixes that one item's own amount) -- don't confuse the
+  two. If the user's intent is ambiguous between "log a new expense" and "adjust the balance itself", ask via
+  "clarification" rather than guessing (this mirrors an existing real interaction: "adjust my rolled-over
+  balance" without a specific number needs the amount, not a guess).
+  correction_action="edit_task" (target_domain="task" only) is a SINGLE flexible action covering an existing
+  to-do's title, due date, and notes -- set whichever of new_description (the title), due_in_days/due_time (the
+  due date), and new_task_notes (a note) the message actually implies changing, in any combination, and leave
+  the rest null. Examples: "push #11 to tomorrow" sets only due_in_days; "actually it's calling the vet, not
+  the dentist" sets only new_description; "push #11 to tomorrow, I need Shardul's address" sets BOTH
+  due_in_days AND new_task_notes in the same correction -- don't split an obviously-compound edit like that
+  into two separate turns, or silently drop the note just because the due date was the more obvious change.
+  A due date here is deliberately forward-looking, unlike edit_date's backward-only days_ago (which can't
+  express "in 3 days") -- due_in_days/due_time are the SAME forward day-count fields log_task uses for a
+  brand-new to-do, just applied to an existing one. At least one of the three fields must actually be
+  changing; if the message is about a to-do but it's unclear WHAT should change, use "clarification" and ask.
 - "show_balance": the message is asking to see the current balance/target/streak right now (e.g. "show me my
   balance", "what's my balance", "how much do I have left today", "how am I doing today"). This is answered
   directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,

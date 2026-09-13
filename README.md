@@ -16,6 +16,19 @@ natural-language pattern.
   `$100 (new target) + $70 (yesterday's leftover) = $170`.
 - Overspend and the balance goes negative, reducing what's available
   tomorrow — same mechanism, opposite direction.
+- **Balance is always derived from logged expenses, never set directly** —
+  it's rebuilt day by day from what's actually in the database, so it can
+  never silently drift from your real history. The one exception is
+  `/adjustbalance <delta>` (e.g. `/adjustbalance -1135.89`), or asking
+  naturally ("add this to my rolled-over deficit -1135.89", "adjust my
+  balance by -50") — a manual nudge for when the derivation itself can't be
+  trusted, most commonly after losing expense history from before some date
+  (a redeploy without persistent storage, see "Deploy to Railway" below): the
+  automatic rollover has nothing to derive that period's real deficit from,
+  so it rolls those days over as if $0 was spent, understating a real
+  overspend. `/adjustbalance` takes a signed delta (added to the current
+  balance), not a replacement value, and reverses with one-word `undo` like
+  every other correction.
 - **Claimable expenses** (`/claim`) are tracked in a completely separate
   pool. They never touch your daily target or balance. Once reimbursed,
   `/claimed` clears all pending claimables.
@@ -150,12 +163,16 @@ last week.
 - **Mark one done** with `/done <id>` or naturally ("I finished calling the
   dentist", "mark the dentist call as done") — reverses with one-word `undo`,
   same as other corrections.
-- **Corrections are intentionally narrower than meals/workouts/vitals right
-  now**: only marking a to-do done or deleting it, not rescheduling — a
-  forward-looking due date can't reuse the backward-only "N days ago" math
-  the other domains' date corrections rely on. Ask to reschedule and Morrow
-  will say so rather than silently doing the wrong thing; delete and re-add
-  works in the meantime.
+- **Edit a to-do, not just its due date** — mark one done, delete one, or
+  edit its title, due date, and/or notes, all through one flexible
+  correction that changes whichever fields the message actually implies
+  (e.g. "push #11 to tomorrow" reschedules only; "push #11 to tomorrow, I
+  need Shardul's address" reschedules AND adds a note, in one go). A due
+  date here is forward-looking — the model extracts *how many days from
+  today*, not a backward "N days ago" like other domains' date corrections,
+  since a due date can legitimately move into the future. Reverses with
+  one-word `undo` like every other correction, restoring the exact prior
+  title/due date/notes.
 
 ## Files
 
@@ -250,6 +267,7 @@ Message your bot on Telegram — `/start` should reply immediately.
 /undo                            remove the single most recent expense
 /edit <id> <amount> [desc...]    fix a mislogged expense
 /delete <id>                     remove a specific expense by ID
+/adjustbalance <delta>            manually nudge rolled-over balance, e.g. /adjustbalance -1135.89
 
 /logmeal <description>           log food/drink, e.g. /logmeal chicken rice and iced tea
                                   (or just send a photo of your food, caption optional)

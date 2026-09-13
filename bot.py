@@ -64,6 +64,7 @@ from finance import (
     _month_to_date_text,
     _recent_text,
     _split_amount_currency_description,
+    adjustbalance_cmd,
     balance,
     claim_expense,
     claimed,

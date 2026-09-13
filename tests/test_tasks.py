@@ -289,9 +289,11 @@ def test_correction_can_delete_a_task_by_domain(monkeypatch):
 
 
 def test_task_correction_rejects_unsupported_edit_date_action(monkeypatch):
-    """Reschedule isn't supported for tasks yet (see the module docstring) --
-    only mark_done and delete are. An edit_date correction_action should hit
-    the same 'not sure / not supported' branch as a genuinely unmatched id."""
+    """edit_date's backward-only days_ago math is still the wrong tool for a
+    to-do's forward-looking due date -- that's what edit_task (due_in_days/
+    due_time) is for instead (see correction.py's TASK_DOMAIN_ACTIONS). An
+    edit_date correction_action should hit the same 'not sure / not
+    supported' branch as a genuinely unmatched id."""
     db.get_or_create_user(CHAT)
     task_id = db.add_task(CHAT, "renew passport")
 

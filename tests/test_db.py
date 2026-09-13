@@ -94,6 +94,52 @@ def test_ensure_rollover_is_noop_same_day():
     assert result["rollovers"] == []
 
 
+# ---------- manual balance adjustment (the one escape hatch from derived balance) ----------
+
+def test_adjust_balance_adds_a_deficit():
+    """Real motivating case: expense history from before some date is gone
+    (lost/reset data), so the automatic rollover has nothing to derive that
+    period's real overspend from. adjust_balance is the manual correction."""
+    db.get_or_create_user(CHAT)
+    result = db.adjust_balance(CHAT, -1135.89)
+    assert result["old_balance"] == 0.0
+    assert result["new_balance"] == -1135.89
+    assert db.get_or_create_user(CHAT)["balance"] == -1135.89
+
+
+def test_adjust_balance_adds_a_credit_on_top_of_existing_balance():
+    db.get_or_create_user(CHAT)
+    db.adjust_balance(CHAT, 50)
+    result = db.adjust_balance(CHAT, 25)
+    assert result["old_balance"] == 50
+    assert result["new_balance"] == 75
+
+
+def test_adjust_balance_catches_up_rollover_first():
+    """A stale balance should be caught up to today before the delta is
+    applied, so the adjustment lands on the current number, not a stale
+    pre-rollover one."""
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    yesterday = date.today() - timedelta(days=1)
+    _insert_on(CHAT, yesterday, 30)
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET last_rollover_date = ? WHERE chat_id = ?",
+            (yesterday.isoformat(), CHAT),
+        )
+    result = db.adjust_balance(CHAT, -10)
+    assert result["old_balance"] == 70.0  # rolled over first (100 - 30)
+    assert result["new_balance"] == 60.0
+
+
+def test_set_balance_restores_an_exact_value():
+    db.get_or_create_user(CHAT)
+    db.adjust_balance(CHAT, -1135.89)
+    db.set_balance(CHAT, 0.0)
+    assert db.get_or_create_user(CHAT)["balance"] == 0.0
+
+
 # ---------- streaks ----------
 
 def test_streak_increments_on_days_within_target():

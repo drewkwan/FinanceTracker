@@ -22,7 +22,18 @@ from telegram.ext import (
 import config
 import db
 from access import _reject_if_not_allowed
-from finance import balance, claim_expense, claimed, delete_cmd, edit_cmd, log_expense, recent, settarget, undo
+from finance import (
+    adjustbalance_cmd,
+    balance,
+    claim_expense,
+    claimed,
+    delete_cmd,
+    edit_cmd,
+    log_expense,
+    recent,
+    settarget,
+    undo,
+)
 from fitness import logworkout_cmd, recentworkouts
 from formatting import _money, _status_text
 from handlers import handle_text, on_error
@@ -53,7 +64,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Check where you stand: /balance\n"
         "Get a breakdown: /summary week\n"
         "See recent entries: /recent\n"
-        "Fix a mistake: /undo, /edit <id> <amount>, or /delete <id>\n\n"
+        "Fix a mistake: /undo, /edit <id> <amount>, or /delete <id>\n"
+        "Manually correct rolled-over balance: /adjustbalance -1135.89\n\n"
         "Log a meal: /logmeal chicken rice and iced tea, or just send a photo of your food\n"
         "See recent meals: /recentmeals\n"
         "Log a workout: /logworkout tennis for an hour\n"
@@ -118,6 +130,7 @@ def main():
     app.add_handler(CommandHandler("undo", undo))
     app.add_handler(CommandHandler("delete", delete_cmd))
     app.add_handler(CommandHandler("edit", edit_cmd))
+    app.add_handler(CommandHandler("adjustbalance", adjustbalance_cmd))
     app.add_handler(CommandHandler("logmeal", logmeal_cmd))
     app.add_handler(CommandHandler("recentmeals", recentmeals))
     app.add_handler(CommandHandler("logworkout", logworkout_cmd))
