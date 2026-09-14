@@ -138,6 +138,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "correction":
         context.chat_data.pop(PENDING_KEY, None)
+        # Deliberately logged BEFORE dispatch, not just on failure -- the
+        # generic "I'm not sure which X you mean" reply gives no visibility
+        # into whether the AI actually got the domain/id/action right (a
+        # real diagnostic gap: a user reported "17 done" failing to mark a
+        # to-do done with no way to tell, from the reply alone, whether
+        # parse_message returned the wrong id, the wrong action, or the
+        # right values against a recent-id set that didn't contain them).
+        logger.info(
+            "correction parsed: chat_id=%s text=%r target_domain=%r target_expense_id=%r "
+            "correction_action=%r recent_task_ids=%s",
+            chat_id, merged_text, parsed.get("target_domain"), parsed.get("target_expense_id"),
+            parsed.get("correction_action"), sorted(recent_task_ids),
+        )
         await _handle_correction(update, context, parsed, recent_ids, recent_meal_ids,
                                   recent_workout_ids, recent_vitals_ids, recent_task_ids)
         return

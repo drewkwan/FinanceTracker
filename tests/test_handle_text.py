@@ -345,6 +345,36 @@ def _edit_task_response(task_id, **overrides):
     return base
 
 
+def test_correction_can_mark_a_task_done_by_bare_number_reference(monkeypatch):
+    """Regression test for a real bad interaction: '17 done', 'task 17 renew
+    esta visa done', and 'completed task 17 from the tasklist' were all
+    rejected with the generic "I'm not sure which to-do you mean" message,
+    even though the to-do (#17, shown to the user with that exact "#17"
+    prefix in /tasks output) genuinely was open. This test locks in the
+    correction.py side of the fix: once parse_message correctly resolves a
+    bare id reference to target_expense_id (the actual fix is a prompt
+    change in ai.py's PARSE_SYSTEM_PROMPT, not testable here since
+    parse_message is mocked), _handle_simple_domain_correction must
+    successfully mark that exact to-do done."""
+    db.get_or_create_user(CHAT)
+    task_id = db.add_task(CHAT, "Renew ESTA visa")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "correction", "target_domain": "task", "target_expense_id": task_id,
+            "correction_action": "mark_done", "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+            **_no_op_correction_fields(),
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "task 17 renew esta visa done")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_task(CHAT, task_id)["done"] == 1
+    assert "Marked done" in update.message.replies[-1]
+
+
 def test_correction_can_reschedule_a_task_due_date(monkeypatch):
     """Regression test for a real user request: 'push #11 to tomorrow' was
     rejected outright because task corrections only supported mark_done and

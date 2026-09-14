@@ -226,7 +226,10 @@ Deciding the intent:
   duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
   logged my lunch", "delete that", "actually it was $50 not $15", "that log from yesterday was wrong, tag it to
   the day before instead", "delete that meal, I logged it twice", "mark the dentist call as done", "I finished
-  that", "delete that task, never mind") -- OR about the rolled-over balance/deficit itself rather than any one
+  that", "delete that task, never mind", "17 done", "task 17 renew esta visa done", "completed task 17 from the
+  tasklist" -- these last three are all target_domain="task", target_expense_id=17, correction_action="mark_done"
+  as long as 17 is an id in the open to-dos list, see the numeric-id-matching rule below) -- OR about the
+  rolled-over balance/deficit itself rather than any one
   logged item (target_domain="balance", see its own paragraph below). First decide target_domain from context
   (an amount/currency strongly implies "expense"; food/calories implies "meal"; a workout activity implies
   "workout"; a to-do title/deadline implies "task"; the words "balance", "rolled-over", or "deficit" with no
@@ -235,7 +238,13 @@ Deciding the intent:
   use "clarification" instead). Then identify the ONE matching item in that domain's recent list -- match on
   whatever the message gives you: amount/description, OR just a date/day reference alone (e.g. "yesterday's
   log", "the one from Monday") is enough on its own if exactly one recent item in that domain has that date,
-  even with no amount or description mentioned. Set target_expense_id to its "id". Only "expense" targets
+  even with no amount or description mentioned. A bare number the user gives you (with or without a "#", "task",
+  or "item" in front of it -- e.g. "17 done", "task 17", "#17", "mark 11 done", "complete 9", "task 17 renew
+  esta visa done") is ALSO enough on its own, with no other corroboration needed, AS LONG AS it matches an "id"
+  actually present in that domain's recent list -- to-dos in particular are always shown to the user with their
+  id as a "#N" prefix (see /tasks output), so a bare number referencing a to-do is the NORMAL way a user names
+  one, not a weak or ambiguous signal that needs a title/date match too. Set target_expense_id to its "id". Only
+  "expense" targets
   support edit_currency/edit_amount/edit_description/edit_category -- for "meal" or "workout" targets, only
   "edit_date" and "delete" are supported right now; for "task" targets, "mark_done", "edit_task" (a flexible
   title/due-date/notes edit -- see below), and "delete" are supported. If the user wants some other field fixed
