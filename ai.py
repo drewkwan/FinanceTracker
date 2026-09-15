@@ -506,7 +506,7 @@ visible portion sizes (refine with the caption if one is given):
 {{"kind": "meal", "meal_type": one of [{MEAL_TYPE_LIST}] or null if it doesn't fit a slot, "items": [list of \
 individual food/drink items as short strings], "calories_low": number, "calories_high": number, \
 "calories_estimate": number, "water_ml": number or null (ONLY for plain water), "caption_extra_item": short \
-string or null}}
+string or null, "logged_days_ago": integer or null}}
 "items"/calories/water_ml here must describe ONLY the food actually visible in the photo -- never fold in \
 something the caption mentions that isn't shown. "caption_extra_item" is the escape hatch for that: set it ONLY \
 when the caption clearly names a DIFFERENT, separate food that ISN'T what's shown in the photo (e.g. a caption \
@@ -522,7 +522,7 @@ screen):
 {{"kind": "workout", "activity": short name (e.g. "run", "cycling"; use "daily activity" for a general \
 activity/calorie summary rather than one named workout), "duration_min": number or null, "distance_km": number \
 or null, "calories_burned": number or null, "notes": short string for any other detail worth keeping (steps, \
-heart rate, active minutes) or null}}
+heart rate, active minutes) or null, "logged_days_ago": integer or null}}
 
 3. Anything else -- a receipt, a document, an unrelated photo, or an image with no food or fitness data in it \
 at all:
@@ -531,7 +531,16 @@ at all:
 Use the caption for extra detail if one is given. For kind "meal" always give calories_low/high/estimate, never \
 omit them. For kind "workout" extract whatever fields ARE actually visible on screen -- leave the rest null \
 rather than guessing at numbers that aren't shown. Never invent a meal or workout that isn't actually shown in \
-the photo -- that produces a nonsense logged entry, which is worse than asking."""
+the photo -- that produces a nonsense logged entry, which is worse than asking.
+
+"logged_days_ago" (both "meal" and "workout") is how many days ago the food/activity actually happened, as a \
+plain integer count -- 0 = today, 1 = yesterday, 2 = two days ago, etc. -- ONLY set this when the caption \
+clearly states or implies a specific past day (e.g. "these were my stats for 15 September", "this was \
+yesterday's lunch", "from Tuesday's workout"); leave it null when the caption doesn't mention a day at all, \
+since the photo was just sent and defaults to today. Extract ONLY the day-count -- NEVER compute or output an \
+actual calendar date yourself; the bot converts your count into a real date deterministically, the same \
+discipline used for every other date field in this app. Cap it at 14 (two weeks) -- if the caption implies \
+something older than that, leave logged_days_ago null instead of guessing a huge number."""
 
 
 def _meal_fallback(seed_text: str | None) -> dict:
@@ -585,6 +594,13 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
       {"kind": "workout", ...}, calories_burned included so it can be shown
       against today's calories eaten
     - anything else (a receipt, a random photo, ...) -> {"kind": "unclear"}
+
+    Both "meal" and "workout" also carry "logged_days_ago" -- a plain day
+    count (never an actual date, same discipline as every other date field
+    in this app), set only when the caption names a specific past day (e.g.
+    "these were my stats for 15 September") so handle_photo can log it on
+    the right date immediately instead of defaulting to today and needing a
+    follow-up correction.
 
     This replaces an earlier, narrower version that only ever asked "is this
     food, yes or no" -- a real bug from that version: someone's screenshot of

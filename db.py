@@ -640,10 +640,15 @@ def _meal_row(row: sqlite3.Row) -> dict:
 
 
 def add_meal(chat_id: int, meal_type: str | None, items: list[str] | None, calories_low: float | None,
-             calories_high: float | None, calories_estimate: float | None, water_ml: float | None = None) -> int:
+             calories_high: float | None, calories_estimate: float | None, water_ml: float | None = None,
+             meal_date: str | None = None) -> int:
     """items: list of strings. Never raises on bad estimate math -- a null
     calories_estimate is stored as-is rather than blocking the log (mirrors
-    fx.py's "never block on an estimate/lookup failure" discipline)."""
+    fx.py's "never block on an estimate/lookup failure" discipline).
+    meal_date defaults to today -- pass it explicitly only when the caller
+    already computed a real backdated date deterministically (e.g.
+    nutrition.handle_photo, from a photo caption naming a specific past
+    day) -- never pass a date guessed by the AI itself."""
     get_or_create_user(chat_id)
     items_json = json.dumps(items or [])
     with get_conn() as conn:
@@ -651,7 +656,7 @@ def add_meal(chat_id: int, meal_type: str | None, items: list[str] | None, calor
             "INSERT INTO meals (chat_id, meal_type, items, calories_low, calories_high, "
             "calories_estimate, water_ml, meal_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (chat_id, meal_type, items_json, calories_low, calories_high, calories_estimate,
-             water_ml, today_str()),
+             water_ml, meal_date or today_str()),
         )
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
@@ -753,13 +758,17 @@ def restore_deleted_meal(chat_id: int, row: dict) -> dict | None:
 
 def add_workout(chat_id: int, activity: str, duration_min: float | None = None,
                  distance_km: float | None = None, notes: str | None = None,
-                 calories_burned: float | None = None) -> int:
+                 calories_burned: float | None = None, workout_date: str | None = None) -> int:
+    """workout_date defaults to today -- pass it explicitly only when the
+    caller already computed a real backdated date deterministically (see
+    add_meal's docstring for the same reasoning; never a date guessed by
+    the AI itself)."""
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO workouts (chat_id, activity, duration_min, distance_km, calories_burned, notes, "
             "workout_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, activity, duration_min, distance_km, calories_burned, notes, today_str()),
+            (chat_id, activity, duration_min, distance_km, calories_burned, notes, workout_date or today_str()),
         )
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
