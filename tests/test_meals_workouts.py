@@ -192,6 +192,26 @@ def test_extract_from_photo_falls_back_to_unclear_on_an_unparseable_reply(monkey
     assert result == {"kind": "unclear"}
 
 
+def test_extract_from_photo_surfaces_a_caption_that_names_a_different_food(monkeypatch):
+    """Regression test for a real bad interaction: a photo of nachos sent
+    with the caption "I also had a small bowl of black bean pork broth" got
+    logged as ONE meal combining both foods -- "loaded nachos ... black bean
+    pork broth" at a wildly over-estimated calorie range, because the
+    caption's separate food got folded straight into the photo's item list.
+    The model now reports that separate food via caption_extra_item instead
+    of blending it into items/calories, and extract_from_photo must surface
+    it as-is (handle_photo is what actually asks about it, tested
+    separately)."""
+    import json
+    payload = {"kind": "meal", "meal_type": "Lunch", "items": ["loaded nachos with pulled pork"],
+               "calories_low": 600, "calories_high": 800, "calories_estimate": 700, "water_ml": None,
+               "caption_extra_item": "a small bowl of black bean pork broth"}
+    _mock_client(monkeypatch, json.dumps(payload))
+    result = ai.extract_from_photo(b"fake-nachos-bytes", caption="I also had a small bowl of black bean pork broth")
+    assert result["caption_extra_item"] == "a small bowl of black bean pork broth"
+    assert result["items"] == ["loaded nachos with pulled pork"]  # the broth must NOT be folded in here
+
+
 def test_extract_workout_happy_path(monkeypatch):
     import json
     payload = {"activity": "tennis", "duration_min": 60, "distance_km": None, "notes": "won 2 sets"}
@@ -416,6 +436,76 @@ def test_photo_of_something_unrelated_is_not_logged_at_all(monkeypatch):
     assert db.get_recent_meals(CHAT) == []
     assert db.get_recent_workouts(CHAT) == []
     assert not any("Logged" in r for r in update.message.replies)
+
+
+def test_photo_with_a_caption_naming_a_different_food_asks_instead_of_guessing(monkeypatch):
+    """Regression test for the real bad interaction: a photo of nachos
+    captioned "I also had a small bowl of black bean pork broth" got logged
+    as ONE entry combining both foods' calories into a wrong, over-estimated
+    total -- the user had to /undo it and redo it by hand. Once
+    extract_from_photo reports caption_extra_item, handle_photo must NOT log
+    anything yet -- it should ask which food(s) are actually meant, and set
+    up the pending-clarification state so the user's plain-text answer
+    resolves it (see the follow-up test)."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {
+            "kind": "meal", "meal_type": "Lunch", "items": ["loaded nachos with pulled pork"],
+            "calories_low": 600, "calories_high": 800, "calories_estimate": 700, "water_ml": None,
+            "caption_extra_item": "a small bowl of black bean pork broth",
+        },
+    )
+    context = FakeContext()
+    update = FakeUpdate(CHAT, caption="I also had a small bowl of black bean pork broth",
+                         photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, context))
+
+    assert db.get_recent_meals(CHAT) == []  # nothing committed yet
+    reply = update.message.replies[-1]
+    assert "nachos" in reply and "black bean pork broth" in reply
+    assert not reply.startswith("Logged")
+    assert bot.PENDING_KEY in context.chat_data  # the text reply that follows must be able to resolve this
+
+
+def test_resolving_a_photo_caption_clarification_logs_only_what_the_user_confirms(monkeypatch):
+    """Follow-up to the test above: once handle_photo asks and stores the
+    pending clarification, the user's plain-text answer ("just log the
+    broth") must flow through the SAME clarification loop handle_text
+    already uses for a natural-language follow-up question, resolving to
+    exactly what the user actually asked for -- not the photo's nachos, not
+    both, just the broth -- the same real resolution as the live bug
+    report."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {
+            "kind": "meal", "meal_type": "Lunch", "items": ["loaded nachos with pulled pork"],
+            "calories_low": 600, "calories_high": 800, "calories_estimate": 700, "water_ml": None,
+            "caption_extra_item": "a small bowl of black bean pork broth",
+        },
+    )
+    context = FakeContext()
+    photo_update = FakeUpdate(CHAT, caption="I also had a small bowl of black bean pork broth",
+                               photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(photo_update, context))
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None):
+        assert "black bean pork broth" in text and "nachos" in text  # the pending context must reach the model
+        return _log_meal_response(meals=[{
+            "meal_type": "Dinner", "items": ["black bean pork broth"],
+            "calories_low": 80, "calories_high": 150, "calories_estimate": 115, "water_ml": None,
+        }])
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    text_update = FakeUpdate(CHAT, text="Just log the black bean broth and it's for dinner")
+    _run(bot.handle_text(text_update, context))
+
+    logged = db.get_recent_meals(CHAT)
+    assert len(logged) == 1
+    assert logged[0]["items"] == ["black bean pork broth"]
+    assert logged[0]["meal_type"] == "Dinner"
 
 
 def test_natural_language_log_workout(monkeypatch):

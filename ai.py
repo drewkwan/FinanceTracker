@@ -505,7 +505,16 @@ these three shapes:
 visible portion sizes (refine with the caption if one is given):
 {{"kind": "meal", "meal_type": one of [{MEAL_TYPE_LIST}] or null if it doesn't fit a slot, "items": [list of \
 individual food/drink items as short strings], "calories_low": number, "calories_high": number, \
-"calories_estimate": number, "water_ml": number or null (ONLY for plain water)}}
+"calories_estimate": number, "water_ml": number or null (ONLY for plain water), "caption_extra_item": short \
+string or null}}
+"items"/calories/water_ml here must describe ONLY the food actually visible in the photo -- never fold in \
+something the caption mentions that isn't shown. "caption_extra_item" is the escape hatch for that: set it ONLY \
+when the caption clearly names a DIFFERENT, separate food that ISN'T what's shown in the photo (e.g. a caption \
+"I also had a small bowl of black bean pork broth" sent with a photo that actually shows nachos -- two distinct \
+foods, not one dish to average together). Leave it null when the caption is just adding detail about the SAME \
+food shown (portion size, ingredients, what it's called), when there's no caption, or when you genuinely can't \
+tell. This exists so the bot can ask which food(s) the user actually wants logged instead of silently merging \
+two different foods into one wrong, over-estimated entry.
 
 2. A fitness/workout stats screen -- a summary from a fitness app or wearable showing calories burned, active \
 minutes, steps, distance, a named workout, and similar (this is NOT a photo of food, even if calories are on \
@@ -564,7 +573,14 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
     show three different things, and each needs a different downstream
     action, so the model reports which one it actually is rather than
     handle_photo just assuming every photo is a meal:
-    - real food/drink -> {"kind": "meal", ...} logged as a meal
+    - real food/drink -> {"kind": "meal", ...} logged as a meal. A meal's
+      "caption_extra_item" is set only when the caption clearly names a food
+      that ISN'T what's in the photo (e.g. photo shows nachos, caption adds
+      "I also had some broth") -- a real bug this guards against: that
+      caption's separate food used to get folded straight into the photo's
+      item list, producing one wrong entry with both foods' calories mashed
+      together. handle_photo checks for this and asks which food(s) the
+      user actually wants logged instead of committing to that guess.
     - a fitness app/wearable's calorie-burned or workout-stats screen ->
       {"kind": "workout", ...}, calories_burned included so it can be shown
       against today's calories eaten

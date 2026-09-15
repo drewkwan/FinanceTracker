@@ -11,7 +11,7 @@ import db
 from access import _reject_if_not_allowed
 from fitness import _log_workout_and_reply
 from formatting import _calorie_range, _daily_meal_totals_text, _meal_line
-from replies import _reply
+from replies import PENDING_KEY, _reply
 
 
 async def _log_meal_and_reply(update: Update, chat_id: int, data: dict):
@@ -81,12 +81,44 @@ async def logmeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _log_meal_and_reply(update, chat_id, data)
 
 
+async def _ask_about_caption_extra_item(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                                         photo_meal: dict, caption_extra: str, caption: str | None):
+    """A photo's caption named a food that ISN'T what's actually in the
+    picture (ai.extract_from_photo's caption_extra_item -- see its docstring)
+    -- a real bad interaction: a photo of nachos captioned "I also had a
+    small bowl of black bean pork broth" got logged as ONE entry combining
+    both foods' calories into a single wrong, over-estimated total, and the
+    user had to undo it and redo it manually. Rather than commit to a guess
+    about which food(s) are actually meant, this asks -- and hands the
+    answer to the SAME clarification loop handle_text already uses for a
+    natural-language follow-up (see replies.PENDING_KEY): the user's next
+    message gets merged with this description and re-parsed by
+    ai.parse_message, which already knows how to log one or several meals
+    from free text, so no separate resolution logic is needed here."""
+    items = ", ".join(photo_meal.get("items") or []) or "something"
+    cal = _calorie_range(photo_meal)
+    original = (
+        f"[Photo logging] A photo was sent showing: {items} ({cal}). Its caption also named a separate food: "
+        f"\"{caption_extra}\" (caption in full: \"{caption}\"). These are two different foods -- log whichever "
+        "one(s) the user actually means below, never combined into one entry."
+    )
+    context.chat_data[PENDING_KEY] = {"original": original}
+    await _reply(
+        update, chat_id,
+        f"I see {items} in the photo (~{cal}) but your caption also mentions \"{caption_extra}\" -- did you "
+        "want both logged separately, just one of them, or something else? Tell me and I'll log it."
+    )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A photo, sent with or without a caption, logs directly -- no command
     needed. What it logs AS depends on what the photo actually shows
     (ai.extract_from_photo classifies it first, rather than assuming every
     photo is a meal):
-    - real food/drink -> logged as a meal, same as before.
+    - real food/drink -> logged as a meal, same as before -- UNLESS the
+      caption named a different, separate food (caption_extra_item is set),
+      in which case this asks which food(s) to actually log rather than
+      guessing (see _ask_about_caption_extra_item).
     - a fitness app/wearable's calorie-burned or workout-stats screen ->
       logged as a workout instead (this is the fix for a real bug: this
       case used to either get logged as a fake, nonsense meal built from the
@@ -104,6 +136,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = ai.extract_from_photo(image_bytes, caption)
     kind = data.get("kind")
     if kind == "meal":
+        caption_extra = data.get("caption_extra_item")
+        if caption_extra:
+            await _ask_about_caption_extra_item(update, context, chat_id, data, caption_extra, caption)
+            return
         await _log_meal_and_reply(update, chat_id, data)
     elif kind == "workout":
         await _log_workout_and_reply(update, chat_id, data)

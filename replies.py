@@ -9,6 +9,16 @@ import config
 import db
 from formatting import _status_text
 
+# The chat_data key holding a not-yet-resolved clarification's original
+# context, shared between handlers.py (the free-text clarification loop --
+# ai.parse_message asked a follow-up question, the next message answers it)
+# and nutrition.py (a photo whose caption seemed to name a second, different
+# food -- see ai.extract_from_photo's "caption_extra_item" -- asks the same
+# way and lets the SAME loop resolve the answer). Lives here, a leaf module
+# with no domain imports, specifically so both of those can import it
+# without a circular import (handlers.py already imports from nutrition.py).
+PENDING_KEY = "pending_expense"
+
 
 async def _reply(update: Update, chat_id: int, text: str):
     """Send a Telegram reply AND persist it to the rolling conversation

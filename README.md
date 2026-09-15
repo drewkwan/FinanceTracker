@@ -77,6 +77,12 @@ natural-language pattern.
   logged as a **workout** instead, with `calories_burned` set. Anything else
   (a receipt, a random photo) isn't logged at all — Morrow asks what you
   actually meant rather than guessing.
+- **A caption naming a different food than the photo doesn't get blended
+  in.** Send a photo of one dish with a caption like "I also had a small
+  bowl of soup" and Morrow won't merge them into one entry with combined
+  (wrong) calories — it asks which food(s) you actually want logged, and
+  your plain-text answer resolves it, exactly like answering any other
+  clarifying question.
 - **Water is tracked separately from calories.** Mention plain water (e.g.
   "750ml water") and it adds to a running `water_ml` total for the day,
   never estimated for other drinks.

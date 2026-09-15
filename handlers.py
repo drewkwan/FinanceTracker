@@ -22,14 +22,13 @@ from finance import _balance_text, _recent_text
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply
-from replies import _reply, _send_alert_if_needed
+from replies import PENDING_KEY, _reply, _send_alert_if_needed
 from rundown import _rundown_reply_text
 from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
 from vitals import _log_vitals_and_reply
 
 logger = logging.getLogger(__name__)
 
-PENDING_KEY = "pending_expense"
 RECENT_EXPENSES_FOR_AI = 8  # how much history the model gets to resolve "that", "the duplicate", etc.
 RECENT_MESSAGES_FOR_AI = 30  # rolling conversation window -- see db.py's module docstring on messages vs memory
 
