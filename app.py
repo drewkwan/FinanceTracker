@@ -5,7 +5,9 @@ module. This is the only place that needs to know about all of them at
 once; every other module only imports the handful it actually depends on.
 """
 
+import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 load_dotenv()  # must run before `import config`, which reads env vars at import time
@@ -38,6 +40,7 @@ from fitness import logworkout_cmd, recentworkouts
 from formatting import _money, _status_text
 from handlers import handle_text, on_error
 from memory import forget_cmd, memory_cmd
+from morning import morning_briefing_tick, morning_cmd
 from nutrition import handle_photo, logmeal_cmd, recentmeals
 from rundown import rundown_cmd
 from summary import summary
@@ -77,7 +80,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Add a to-do: /addtask call the dentist tomorrow 5pm\n"
         "See what's open: /tasks\n"
         "Mark one done: /done <id>\n\n"
-        "How's everything going, across money/food/training/vitals together: /rundown\n\n"
+        "How's everything going, across money/food/training/vitals together: /rundown\n"
+        "See today's briefing (today's budget + due to-dos + a look back at yesterday) any time: /morning\n\n"
         "Or just tell me naturally, e.g. \"spent 15 on uber\", \"had a mango\", \"played tennis for an hour\", "
         "\"weight 76.6, slept 5.5 hours\", \"remember I go to Fitness First Bugis Tue/Thu\", \"remind me to call "
         "the dentist tomorrow\", or \"how am I doing this week\" -- and just talk to me the rest of the time, "
@@ -142,17 +146,23 @@ def main():
     app.add_handler(CommandHandler("addtask", addtask_cmd))
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("morning", morning_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(on_error)
 
     if app.job_queue is not None:
         app.job_queue.run_repeating(rollover_tick, interval=3600, first=10)
+        briefing_time = datetime.time(
+            config.MORNING_BRIEFING_HOUR, config.MORNING_BRIEFING_MINUTE, tzinfo=ZoneInfo(config.BOT_TIMEZONE)
+        )
+        app.job_queue.run_daily(morning_briefing_tick, time=briefing_time)
     else:
         logger.warning(
             "JobQueue not available -- install with pip install python-telegram-bot[job-queue] "
-            "to get automatic daily rollover notifications. Rollover math still runs correctly "
-            "whenever a user interacts with the bot."
+            "to get automatic daily rollover notifications and the morning briefing. Rollover math "
+            "still runs correctly, and /morning still works on demand, whenever a user interacts "
+            "with the bot -- only the proactive daily push needs JobQueue."
         )
 
     logger.info("Bot starting (polling)...")

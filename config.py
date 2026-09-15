@@ -53,6 +53,12 @@ KNOWN_CURRENCIES = [
 # once crossed, triggers a one-time heads-up message for the day.
 BUDGET_ALERT_THRESHOLD = float(os.environ.get("BUDGET_ALERT_THRESHOLD", "0.9"))
 
+# Local time (in BOT_TIMEZONE above) the automatic morning briefing goes out
+# each day -- see morning.py. /morning previews the same content on demand
+# at any time, so this only controls the proactive daily push.
+MORNING_BRIEFING_HOUR = int(os.environ.get("MORNING_BRIEFING_HOUR", "7"))
+MORNING_BRIEFING_MINUTE = int(os.environ.get("MORNING_BRIEFING_MINUTE", "30"))
+
 CATEGORIES = [
     "Food",
     "Groceries",

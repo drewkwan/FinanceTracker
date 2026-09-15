@@ -159,6 +159,30 @@ expense-only and answer *today's* numbers directly; `/rundown` is the one
 that reads across money, food, training, and vitals together over the
 last week.
 
+## How the morning briefing works
+
+Every day at a fixed local time (`MORNING_BRIEFING_HOUR`/`MORNING_BRIEFING_MINUTE`
+in `BOT_TIMEZONE`, default 7:30am), Morrow pushes a short digest to every
+chat automatically — no command needed. `/morning` shows the exact same
+content on demand, any time, so you can check it works or re-check today's
+digest later in the day.
+
+Unlike `/rundown`'s 7-day retrospective, the briefing is forward-looking:
+today's target, rolled-over balance, and streak; any open to-do that's due
+today or already overdue (an undated to-do, or one due later this week,
+isn't something that needs attention *this morning* specifically — `/tasks`
+still shows the full list); and, for light context, a one-line look back at
+just yesterday (calories eaten, workouts, vitals check-ins). There's no AI
+narration step here at all — every figure is computed directly the same
+"never let the model guess a number" way as `/rundown`, but skipping the
+Claude call entirely means the one message that's supposed to show up
+reliably every single morning can never be delayed or broken by an API
+hiccup.
+
+If `python-telegram-bot`'s job-queue extra isn't installed, the automatic
+daily push won't fire (same caveat as the hourly rollover check — see the
+startup log warning), but `/morning` still works on demand regardless.
+
 ## How to-dos work
 
 - **Add one** with `/addtask <description>` or naturally — "remind me to call
@@ -194,7 +218,9 @@ last week.
 
 | File | Purpose |
 |---|---|
-| `bot.py` | Telegram handlers, command definitions, the periodic rollover job |
+| `bot.py` | Thin facade re-exporting every domain module's names (see its own docstring) |
+| `app.py` | Entrypoint: builds the bot, registers every handler, the periodic rollover job |
+| `morning.py` | The daily morning briefing (`/morning` + the automatic proactive push) |
 | `db.py` | SQLite schema + all balance/rollover/claimable/streak/alert logic |
 | `fx.py` | Currency conversion (Frankfurter/ECB rates, cached, with 1:1 fallback) |
 | `ai.py` | Claude calls: natural-language parsing, categorization, on-demand summaries |
@@ -301,6 +327,8 @@ Message your bot on Telegram — `/start` should reply immediately.
 /done <id>                        mark a to-do done
 
 /rundown                         cross-domain check-in: money + food + training + vitals, last 7 days
+/morning                         today's briefing: budget + due/overdue to-dos + a look back at yesterday
+                                  (also sent automatically once a day -- see "How the morning briefing works")
 ```
 
 Or skip commands and just type naturally:
