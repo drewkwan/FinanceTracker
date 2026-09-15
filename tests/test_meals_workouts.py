@@ -566,3 +566,144 @@ def test_undo_reverts_a_meal_deletion(monkeypatch):
     undo_update = FakeUpdate(CHAT, text="undo")
     _run(bot.handle_text(undo_update, context))
     assert db.get_recent_meals(CHAT)[0]["items"] == ["mango"]
+
+
+# ---------- duplicate-workout detection (two photos, same underlying data) ----------
+
+def test_photo_of_duplicate_fitness_stats_asks_instead_of_logging_twice(monkeypatch):
+    """Regression test for a real bad interaction: two photos of the same
+    underlying fitness-app data (identical calories_burned: 2279) got
+    logged as two separate workouts, silently doubling the day's total to
+    4558. A second photo reporting a calories_burned that matches an
+    already-logged workout for the same day must ask instead of
+    auto-logging a duplicate."""
+    db.get_or_create_user(CHAT)
+    db.add_workout(CHAT, "daily activity", calories_burned=2279, notes="Move goal 380/700")
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {"kind": "workout", "activity": "daily activity",
+                                            "duration_min": None, "distance_km": None,
+                                            "calories_burned": 2279, "notes": "Total active time 13h 22m"},
+    )
+    context = FakeContext()
+    update = FakeUpdate(CHAT, caption="my stats", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, context))
+
+    assert len(db.get_recent_workouts(CHAT)) == 1  # still just the one logged above
+    reply = update.message.replies[-1]
+    assert not reply.startswith("Logged")
+    assert bot.PENDING_DUPLICATE_WORKOUT_KEY in context.chat_data
+
+
+def test_confirming_a_duplicate_workout_is_actually_separate_logs_it(monkeypatch):
+    db.get_or_create_user(CHAT)
+    db.add_workout(CHAT, "daily activity", calories_burned=2279)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {"kind": "workout", "activity": "run",
+                                            "duration_min": 30, "distance_km": 5.0,
+                                            "calories_burned": 2279, "notes": None},
+    )
+    context = FakeContext()
+    photo_update = FakeUpdate(CHAT, caption="my stats", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(photo_update, context))
+    assert len(db.get_recent_workouts(CHAT)) == 1
+
+    text_update = FakeUpdate(CHAT, text="No that's a separate workout, log it anyway")
+    _run(bot.handle_text(text_update, context))
+
+    workouts = db.get_recent_workouts(CHAT)
+    assert len(workouts) == 2
+    assert any(w["activity"] == "run" for w in workouts)
+    assert bot.PENDING_DUPLICATE_WORKOUT_KEY not in context.chat_data
+
+
+def test_declining_a_duplicate_workout_skips_it(monkeypatch):
+    db.get_or_create_user(CHAT)
+    db.add_workout(CHAT, "daily activity", calories_burned=2279)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {"kind": "workout", "activity": "daily activity",
+                                            "duration_min": None, "distance_km": None,
+                                            "calories_burned": 2279, "notes": None},
+    )
+    context = FakeContext()
+    photo_update = FakeUpdate(CHAT, caption="my stats", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(photo_update, context))
+
+    text_update = FakeUpdate(CHAT, text="No, same one shown again, skip it")
+    _run(bot.handle_text(text_update, context))
+
+    assert len(db.get_recent_workouts(CHAT)) == 1  # unchanged -- no duplicate created
+    assert bot.PENDING_DUPLICATE_WORKOUT_KEY not in context.chat_data
+
+
+def test_photo_workout_not_flagged_as_duplicate_when_calories_differ_substantially(monkeypatch):
+    """A genuinely different workout that happens to also report a
+    calories_burned figure must NOT be blocked -- only an actual match
+    (within the 2%/5kcal tolerance) counts as a likely duplicate."""
+    db.get_or_create_user(CHAT)
+    db.add_workout(CHAT, "run", calories_burned=300)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {"kind": "workout", "activity": "cycling",
+                                            "duration_min": None, "distance_km": None,
+                                            "calories_burned": 900, "notes": None},
+    )
+    update = FakeUpdate(CHAT, caption="stats", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, FakeContext()))
+    assert len(db.get_recent_workouts(CHAT)) == 2
+    assert any(r.startswith("Logged") for r in update.message.replies)
+
+
+# ---------- backdating a photo log from its caption's date (logged_days_ago) ----------
+
+def test_target_date_from_days_ago_caps_and_handles_none():
+    assert bot._target_date_from_days_ago(None) is None
+    assert bot._target_date_from_days_ago(0) is None
+    assert bot._target_date_from_days_ago(999) == (dt.date.today() - dt.timedelta(days=14)).isoformat()
+    assert bot._target_date_from_days_ago(1) == (dt.date.today() - dt.timedelta(days=1)).isoformat()
+
+
+def test_photo_meal_with_caption_date_logs_directly_onto_that_day(monkeypatch):
+    """Regression test for a real bad interaction: a photo captioned "these
+    were my stats for 15 September" got logged as today anyway, needing a
+    manual /undo + date correction afterwards. Once extract_from_photo
+    reports logged_days_ago, handle_photo must log directly onto the
+    correct backdated day instead."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {
+            "kind": "meal", "meal_type": "Dinner", "items": ["rice", "chicken"],
+            "calories_low": 400, "calories_high": 600, "calories_estimate": 500, "water_ml": None,
+            "logged_days_ago": 2,
+        },
+    )
+    update = FakeUpdate(CHAT, caption="this was from 2 days ago", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, FakeContext()))
+
+    expected_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    logged = db.get_recent_meals(CHAT)[0]
+    assert logged["meal_date"] == expected_date
+    assert logged["meal_date"] != db.today_str()
+    reply = update.message.replies[-1]
+    assert expected_date in reply  # the running-total line must be labelled for that day, not "today"
+
+
+def test_photo_workout_with_caption_date_logs_directly_onto_that_day(monkeypatch):
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(
+        bot.ai, "extract_from_photo",
+        lambda image_bytes, caption=None: {
+            "kind": "workout", "activity": "daily activity", "duration_min": None,
+            "distance_km": None, "calories_burned": 2279, "notes": None,
+            "logged_days_ago": 1,
+        },
+    )
+    update = FakeUpdate(CHAT, caption="these were my stats for yesterday", photo=[_FakePhotoSize()])
+    _run(bot.handle_photo(update, FakeContext()))
+
+    expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    logged = db.get_recent_workouts(CHAT)[0]
+    assert logged["workout_date"] == expected_date

@@ -19,10 +19,11 @@ import fx
 from access import _reject_if_not_allowed
 from correction import CORRECTION_UNDO_PHRASES, LAST_CORRECTION_KEY, _handle_correction, _revert_last_correction
 from finance import _balance_text, _recent_text
+from fitness import _force_log_workout_and_reply
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply
-from replies import PENDING_KEY, _reply, _send_alert_if_needed
+from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
 from rundown import _rundown_reply_text
 from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
 from vitals import _log_vitals_and_reply
@@ -82,6 +83,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
+
+    # A pending duplicate-workout question (see fitness._ask_about_duplicate_workout)
+    # is resolved directly here, deterministically, rather than falling through to
+    # the general ai.parse_message pipeline below -- that pipeline's "log_workout"
+    # shape has nowhere to carry calories_burned (see ai.py's PARSE_SYSTEM_PROMPT),
+    # so re-parsing this reply as free text would silently drop the exact number
+    # the photo already gave us. We already have the fully-parsed photo data
+    # (stashed by fitness.py); all that's needed here is yes or no.
+    dup_pending = context.chat_data.pop(PENDING_DUPLICATE_WORKOUT_KEY, None)
+    if dup_pending:
+        db.add_message(chat_id, "user", text)
+        affirmative = any(
+            w in text.lower()
+            for w in ("yes", "separate", "different", "another", "anyway", "log it", "do log", "keep both")
+        )
+        if affirmative:
+            await _force_log_workout_and_reply(update, chat_id, dup_pending["data"], dup_pending["workout_date"])
+        else:
+            await _reply(update, chat_id, "Got it -- skipped, since it looked like the same workout logged twice.")
+        return
+
     pending = context.chat_data.get(PENDING_KEY)
     db.add_message(chat_id, "user", text)
 

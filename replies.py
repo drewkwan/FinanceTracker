@@ -19,6 +19,17 @@ from formatting import _status_text
 # without a circular import (handlers.py already imports from nutrition.py).
 PENDING_KEY = "pending_expense"
 
+# A second, narrower pending-state key: a duplicate-looking workout (see
+# fitness._find_matching_calories_burned/_ask_about_duplicate_workout) needs
+# a yes/no answer, not a free-text re-parse -- ai.parse_message's log_workout
+# shape has nowhere to carry calories_burned (only a typed /logworkout ever
+# hits that path, which rarely reports one), so reusing PENDING_KEY's
+# merge-and-reparse loop would silently drop the exact number the photo
+# already gave us. handlers.handle_text checks this key FIRST, ahead of the
+# general PENDING_KEY handling, and resolves it deterministically from the
+# already-parsed photo data stored here -- no AI re-parse involved.
+PENDING_DUPLICATE_WORKOUT_KEY = "pending_duplicate_workout"
+
 
 async def _reply(update: Update, chat_id: int, text: str):
     """Send a Telegram reply AND persist it to the rolling conversation

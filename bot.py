@@ -75,7 +75,13 @@ from finance import (
     settarget,
     undo,
 )
-from fitness import _log_workout_and_reply, logworkout_cmd, recentworkouts
+from fitness import (
+    _find_duplicate_workout,
+    _force_log_workout_and_reply,
+    _log_workout_and_reply,
+    logworkout_cmd,
+    recentworkouts,
+)
 from formatting import (
     _calorie_range,
     _daily_calorie_balance_text,
@@ -90,6 +96,7 @@ from formatting import (
     _workout_line,
 )
 from handlers import (
+    PENDING_DUPLICATE_WORKOUT_KEY,
     PENDING_KEY,
     RECENT_EXPENSES_FOR_AI,
     RECENT_MESSAGES_FOR_AI,
@@ -98,7 +105,14 @@ from handlers import (
 )
 from memory import _memory_for_ai, _memory_text, forget_cmd, memory_cmd
 from morning import _morning_briefing_payload, _morning_briefing_text, morning_briefing_tick, morning_cmd
-from nutrition import _log_meal_and_reply, _log_meals_and_reply, handle_photo, logmeal_cmd, recentmeals
+from nutrition import (
+    _log_meal_and_reply,
+    _log_meals_and_reply,
+    _target_date_from_days_ago,
+    handle_photo,
+    logmeal_cmd,
+    recentmeals,
+)
 from replies import _reply, _send_alert_if_needed
 from rundown import RUNDOWN_WINDOW_DAYS, _rundown_fallback_text, _rundown_payload, _rundown_reply_text, rundown_cmd
 from summary import WEEKDAY_NAMES, summary

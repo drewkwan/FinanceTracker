@@ -99,8 +99,24 @@ natural-language pattern.
   rather than forcing structure that isn't there yet.
 - **Calories burned are shown against calories eaten.** When a workout is
   logged with `calories_burned` set (typically from a fitness app/wearable
-  screenshot — see above), the reply also shows today's running "calories in
-  vs calories burned" balance, not just the number in isolation.
+  screenshot — see above), the reply also shows that day's running "calories
+  in vs calories burned" balance, not just the number in isolation.
+- **Two photos of the same fitness-app data don't get logged as two
+  workouts.** A real bad interaction: two screenshots of the same day's
+  stats (a Move-goal screen and an Activity-summary screen) reported the
+  same `calories_burned` and got logged as two separate workouts, silently
+  doubling the day's burned total. A new photo whose `calories_burned`
+  closely matches (within 2%, minimum 5 kcal) an already-logged workout for
+  the same day is flagged as a likely duplicate — Morrow asks whether it's
+  really a separate workout or the same one shown again, rather than
+  logging it twice automatically.
+- **A photo's caption naming a specific past day backdates the log
+  immediately, at log time.** "These were my stats for 15 September" used
+  to get logged as today anyway, needing a manual `/undo` plus a date
+  correction afterwards. Claude now extracts how many days ago the caption
+  implies (never an actual date — the bot converts that day-count into a
+  real date deterministically, the same discipline used everywhere else a
+  date is involved) and logs the meal or workout directly onto that day.
 - **Vitals** (`/logvitals` or natural language, e.g. "weight 76.6, slept 5.5
   hours, knee 2/10") log whatever you mention — weight, sleep hours, knee
   pain (0-10), and free-text notes — leaving anything you didn't mention

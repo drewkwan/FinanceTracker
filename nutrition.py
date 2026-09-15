@@ -3,6 +3,8 @@ Meal logging: /logmeal, photo logging, /recentmeals. Meals are logged as
 items, not meal slots -- see the module docstring in ai.py for why.
 """
 
+from datetime import date, timedelta
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -14,22 +16,42 @@ from formatting import _calorie_range, _daily_meal_totals_text, _meal_line
 from replies import PENDING_KEY, _reply
 
 
-async def _log_meal_and_reply(update: Update, chat_id: int, data: dict):
+def _target_date_from_days_ago(days_ago) -> str | None:
+    """Converts ai.extract_from_photo's logged_days_ago (a plain day-count,
+    never a date -- see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT) into a real
+    ISO date deterministically, the same discipline correction.py and
+    tasks.py already use for their own day-count/due-in-days fields.
+    Returns None (log onto today, the existing default) when the caption
+    didn't imply a specific past day, or when it implied today itself.
+    Defensively re-clamps to the same 0-14 range the prompt asks the model
+    to respect, in case it doesn't."""
+    if not days_ago:
+        return None
+    days_ago = max(0, min(14, int(days_ago)))
+    if days_ago == 0:
+        return None
+    return (date.today() - timedelta(days=days_ago)).isoformat()
+
+
+async def _log_meal_and_reply(update: Update, chat_id: int, data: dict, meal_date: str | None = None):
     """Shared by /logmeal, photo logging, and the natural-language log_meal
     intent -- one insert, one reply shape, so all three paths are
     guaranteed to say the same thing (see finance._balance_text's docstring
-    for the same reasoning applied to /balance)."""
+    for the same reasoning applied to /balance). meal_date lets a caller
+    that already computed a real backdated date (see
+    _target_date_from_days_ago) log directly onto the right day instead of
+    defaulting to today and needing a follow-up correction."""
     meal_id = db.add_meal(
         chat_id, data.get("meal_type"), data.get("items") or data.get("meal_items"),
         data.get("calories_low"), data.get("calories_high"), data.get("calories_estimate"),
-        water_ml=data.get("water_ml"),
+        water_ml=data.get("water_ml"), meal_date=meal_date,
     )
     row = db.get_meal(chat_id, meal_id)
     items = ", ".join(row["items"]) or "meal"
     water_line = f"\nWater: +{row['water_ml']:.0f}ml" if row.get("water_ml") else ""
     await _reply(
         update, chat_id,
-        f"Logged: {items} -- {_calorie_range(row)}{water_line}\n\n{_daily_meal_totals_text(chat_id)}"
+        f"Logged: {items} -- {_calorie_range(row)}{water_line}\n\n{_daily_meal_totals_text(chat_id, meal_date)}"
     )
 
 
@@ -124,8 +146,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
       case used to either get logged as a fake, nonsense meal built from the
       caption, or -- an earlier, narrower fix -- get rejected outright as
       "not food" even though it plainly was useful data, just not a meal).
+      If it looks like a duplicate of an already-logged workout (two photos
+      of the same underlying fitness-app data), this asks before logging a
+      second time instead of silently doubling the day's total (see
+      fitness._find_duplicate_workout).
     - anything else (a receipt, an unrelated photo, ...) -> not logged;
-      asks what the user actually wants to do with it instead of guessing."""
+      asks what the user actually wants to do with it instead of guessing.
+
+    Both the "meal" and "workout" cases log onto the day the caption
+    actually implies (see ai's logged_days_ago / _target_date_from_days_ago)
+    rather than always today -- a real bad interaction: "these were my
+    stats for 15 September" got logged as today anyway, needing a manual
+    correction afterwards."""
     if await _reject_if_not_allowed(update):
         return
     chat_id = update.effective_chat.id
@@ -135,14 +167,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_bytes = bytes(await tg_file.download_as_bytearray())
     data = ai.extract_from_photo(image_bytes, caption)
     kind = data.get("kind")
+    target_date = _target_date_from_days_ago(data.get("logged_days_ago"))
     if kind == "meal":
         caption_extra = data.get("caption_extra_item")
         if caption_extra:
             await _ask_about_caption_extra_item(update, context, chat_id, data, caption_extra, caption)
             return
-        await _log_meal_and_reply(update, chat_id, data)
+        await _log_meal_and_reply(update, chat_id, data, meal_date=target_date)
     elif kind == "workout":
-        await _log_workout_and_reply(update, chat_id, data)
+        await _log_workout_and_reply(update, context, chat_id, data, workout_date=target_date)
     else:
         await _reply(
             update, chat_id,

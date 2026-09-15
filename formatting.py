@@ -92,25 +92,37 @@ def _memory_line(row: dict) -> str:
     return f"{row['label']}{cat}: {row['content']}"
 
 
-def _daily_meal_totals_text(chat_id: int) -> str:
-    totals = db.get_daily_meal_totals(chat_id, db.today_str())
-    line = f"Today's running total: ~{totals['calories']:.0f} kcal"
+def _daily_meal_totals_text(chat_id: int, day: str | None = None) -> str:
+    """day defaults to today. Pass it explicitly when the meal being
+    confirmed was logged onto a different (backdated) day -- e.g. a photo
+    whose caption named a past date (see ai.py's logged_days_ago) -- so the
+    total shown is the total for the day actually affected, not a
+    same-labelled "today's running total" that's quietly about the wrong
+    day."""
+    day = day or db.today_str()
+    totals = db.get_daily_meal_totals(chat_id, day)
+    label = "Today's running total" if day == db.today_str() else f"Running total for {day}"
+    line = f"{label}: ~{totals['calories']:.0f} kcal"
     if totals["water_ml"]:
         line += f", {totals['water_ml']:.0f}ml water"
     return line
 
 
-def _daily_calorie_balance_text(chat_id: int) -> str:
-    """Calories in vs calories out for today -- shown alongside a logged
-    workout that reports calories_burned (e.g. from a fitness app
-    screenshot, see ai.extract_from_photo), so burning calories is actually
-    useful information rather than a number logged in isolation. Meal
-    calories logged today is "in", today's summed workout calories_burned is
-    "out"; net can go either way depending on which is bigger."""
-    day = db.today_str()
+def _daily_calorie_balance_text(chat_id: int, day: str | None = None) -> str:
+    """Calories in vs calories out for a given day (defaults to today) --
+    shown alongside a logged workout that reports calories_burned (e.g. from
+    a fitness app screenshot, see ai.extract_from_photo), so burning
+    calories is actually useful information rather than a number logged in
+    isolation. Meal calories logged that day is "in", that day's summed
+    workout calories_burned is "out"; net can go either way depending on
+    which is bigger. day is passed explicitly for a backdated workout (see
+    _daily_meal_totals_text's docstring for the same reasoning) so the
+    balance shown matches the day the workout was actually logged onto."""
+    day = day or db.today_str()
     calories_in = db.get_daily_meal_totals(chat_id, day)["calories"]
     calories_out = db.get_daily_workout_totals(chat_id, day)["calories_burned"]
     net = calories_in - calories_out
     sign = "-" if net < 0 else ""
-    return (f"Today: ~{calories_in:.0f} kcal in, ~{calories_out:.0f} kcal burned "
+    label = "Today" if day == db.today_str() else day
+    return (f"{label}: ~{calories_in:.0f} kcal in, ~{calories_out:.0f} kcal burned "
             f"(net {sign}{abs(net):.0f} kcal)")
