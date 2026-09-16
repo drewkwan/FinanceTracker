@@ -30,7 +30,13 @@ def _target_date_from_days_ago(days_ago) -> str | None:
     days_ago = max(0, min(14, int(days_ago)))
     if days_ago == 0:
         return None
-    return (date.today() - timedelta(days=days_ago)).isoformat()
+    # db.today_str() -- NOT date.today() -- for the same reason every other
+    # date computation in this app goes through it: date.today() is the
+    # server's/OS date (UTC on Railway), which lags Asia/Singapore's actual
+    # calendar date by up to 8 hours after local midnight. Backdating a
+    # photo logged in that window from the wrong "today" would land it a
+    # day off from what the caption actually meant.
+    return (date.fromisoformat(db.today_str()) - timedelta(days=days_ago)).isoformat()
 
 
 async def _log_meal_and_reply(update: Update, chat_id: int, data: dict, meal_date: str | None = None):

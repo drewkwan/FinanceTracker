@@ -9,7 +9,8 @@ once a day, so an in-memory per-day cache avoids hammering it.
 import json
 import logging
 import urllib.request
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -18,13 +19,30 @@ logger = logging.getLogger(__name__)
 _rate_cache = {}  # (from_ccy, to_ccy, iso_date) -> rate
 
 
+def _now_local_date() -> date:
+    """Local calendar date in config.BOT_TIMEZONE -- deliberately NOT
+    date.today() (the server's/OS date, UTC on Railway). That was a real
+    bug: right after local midnight in Asia/Singapore (UTC+8) but before
+    UTC midnight, date.today() still returns YESTERDAY's date for up to 8
+    hours, so a rate fetched in that window got cached under the wrong day
+    -- silently disagreeing with every other "what day is it" computation
+    in the app (db.today_str() is the canonical one; see its docstring).
+    A twin of db._now_local_date, not imported from there: db.py already
+    imports fx.py (for currency conversion), so fx.py importing db.py back
+    would be a circular import. Kept in sync by hand -- change one, change
+    the other. Exposed as its own function (like db._now_local_date) so
+    tests can monkeypatch it directly instead of needing to fake the
+    system clock."""
+    return datetime.now(ZoneInfo(config.BOT_TIMEZONE)).date()
+
+
 def get_rate(from_ccy: str, to_ccy: str) -> float:
     from_ccy = from_ccy.upper()
     to_ccy = to_ccy.upper()
     if from_ccy == to_ccy:
         return 1.0
 
-    key = (from_ccy, to_ccy, date.today().isoformat())
+    key = (from_ccy, to_ccy, _now_local_date().isoformat())
     if key in _rate_cache:
         return _rate_cache[key]
 

@@ -443,6 +443,16 @@ Python and handed to Claude to narrate — never estimated by the model itself.
   multiple chats if you ever want to share it.
 - `BOT_TIMEZONE` and `BASE_CURRENCY` are global settings (not per-user) —
   simplest correct choice for a personal bot.
+- **Every "what day is it" computation goes through `db.today_str()`**
+  (or fx.py's own identical, independently-monkeypatchable twin,
+  `fx._now_local_date()` — see its docstring for why it can't just import
+  `db.py`), never the bare `date.today()`/`datetime.now()`. This mattered
+  in practice: Railway's server clock is UTC, and Asia/Singapore is
+  UTC+8, so `date.today()` lags the real Singapore calendar date by up to
+  8 hours after local midnight — logging, backdating a photo, `/summary
+  today`, and the exchange-rate cache all used to disagree with each
+  other (and with what you actually meant) in that window. If you add a
+  new date computation anywhere, reach for `db.today_str()`.
 - If the bot goes offline for a few days, the next time it's queried it
   rolls forward day-by-day using whatever your *current* daily target is —
   a reasonable approximation rather than perfect historical accuracy.

@@ -665,6 +665,20 @@ def test_target_date_from_days_ago_caps_and_handles_none():
     assert bot._target_date_from_days_ago(1) == (dt.date.today() - dt.timedelta(days=1)).isoformat()
 
 
+def test_target_date_from_days_ago_uses_bot_timezone_not_server_clock(monkeypatch):
+    """Regression test for a real bug: this used to anchor on date.today()
+    (the server's/OS date -- UTC on Railway) instead of db.today_str()
+    (BOT_TIMEZONE-aware). Asia/Singapore is UTC+8, so a photo backdated
+    right after local midnight there, during the up-to-8-hour window before
+    UTC midnight also rolls over, landed a day off from what the caption
+    actually meant. A fake "today" deliberately different from whatever
+    the real system clock says in CI makes sure this fails if date.today()
+    ever creeps back in."""
+    fake_today = dt.date(2026, 9, 20)
+    monkeypatch.setattr(db, "_now_local_date", lambda: fake_today)
+    assert bot._target_date_from_days_ago(2) == (fake_today - dt.timedelta(days=2)).isoformat()
+
+
 def test_photo_meal_with_caption_date_logs_directly_onto_that_day(monkeypatch):
     """Regression test for a real bad interaction: a photo captioned "these
     were my stats for 15 September" got logged as today anyway, needing a

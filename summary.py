@@ -41,7 +41,12 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     period_arg = context.args[0] if context.args else "week"
-    bounds = trends.period_bounds(period_arg, date.today())
+    # db.today_str() -- NOT date.today() -- see fx._now_local_date's
+    # docstring: date.today() is the server's/OS date (UTC on Railway),
+    # which lags Asia/Singapore's actual calendar date by up to 8 hours
+    # after local midnight, so "/summary today" run in that window used to
+    # silently show yesterday's totals under the label "today".
+    bounds = trends.period_bounds(period_arg, date.fromisoformat(db.today_str()))
     period = bounds["period"]
     length = bounds["length"]
     today = bounds["today"]

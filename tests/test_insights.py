@@ -173,3 +173,32 @@ def test_summary_still_falls_back_to_raw_breakdown_when_ai_call_fails(monkeypatc
     reply = update.message.replies[0]
     assert "Food" in reply
     assert "42" in reply
+
+
+def test_summary_today_uses_bot_timezone_date_not_server_clock(monkeypatch):
+    """Regression test for a real bug: /summary today anchored its date
+    window on date.today() (the server's/OS date -- UTC on Railway, per
+    Procfile) instead of db.today_str() (BOT_TIMEZONE-aware -- see
+    db._now_local_date's docstring). Asia/Singapore is UTC+8, so right
+    after local midnight there, during the up-to-8-hour window before UTC
+    midnight also rolls over, date.today() still returned YESTERDAY --
+    meaning an expense logged "today" in Singapore wouldn't show up in
+    "today"'s own /summary. Using a date deliberately different from
+    whatever the real system clock says in CI makes sure this test fails
+    if the old date.today() call ever creeps back in."""
+    db.get_or_create_user(CHAT)
+    fake_today = date(2026, 9, 20)
+    monkeypatch.setattr(db, "_now_local_date", lambda: fake_today)
+    _insert(CHAT, fake_today, 42, category="Food", description="late-night snack")
+
+    def _boom(period, payload):
+        raise RuntimeError("simulated AI failure")
+
+    monkeypatch.setattr(bot.ai, "answer_with_trends", _boom)
+
+    update = FakeUpdate(CHAT)
+    _run(bot.summary(update, FakeContext(args=["today"])))
+
+    reply = update.message.replies[0]
+    assert "Food" in reply
+    assert "42" in reply
