@@ -31,7 +31,7 @@ from telegram.ext import ContextTypes
 import config
 import db
 import fx
-from formatting import _meal_line, _memory_line, _money, _task_line, _vitals_line, _workout_line
+from formatting import _meal_line, _memory_line, _money, _reminder_line, _task_line, _vitals_line, _workout_line
 from replies import _reply
 
 LAST_CORRECTION_KEY = "last_correction"
@@ -407,6 +407,20 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
     if domain == "balance":
         db.set_balance(chat_id, snap["old_balance"])
         await _reply(update, chat_id, f"Reverted -- balance is back to {_money(snap['old_balance'])}.")
+        return True
+
+    if domain == "reminder":
+        # Slash-command-only right now (/donereminder, /removereminder --
+        # see reminders.py's module docstring for why), so this is its own
+        # small branch rather than living in _DOMAIN_OPS, the same reason
+        # "memory" above gets one instead of forcing itself into that
+        # id-set-matching, AI-correction-driven registry.
+        if action == "delete":
+            restored = db.restore_deleted_reminder(chat_id, snap["row"])
+            await _reply(update, chat_id, f"Restored: {_reminder_line(restored)}")
+        elif action == "mark_done":
+            row = db.unmark_reminder_done_today(chat_id, snap["reminder_id"])
+            await _reply(update, chat_id, f"Reverted -- back to not done today: {_reminder_line(row)}")
         return True
 
     if domain in _DOMAIN_OPS:

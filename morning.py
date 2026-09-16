@@ -1,8 +1,9 @@
 """
 Morning briefing: a proactive daily digest -- today's budget, today's/
-overdue to-dos, and a brief look back at yesterday -- pushed automatically
-once a day (see app.py's job_queue.run_daily wiring), plus /morning to
-preview the same content any time.
+overdue to-dos, today's still-pending daily reminders, and a brief look
+back at yesterday -- pushed automatically once a day (see app.py's
+job_queue.run_daily wiring), plus /morning to preview the same content
+any time.
 
 Deliberately forward-looking, unlike rundown.py's 7-day retrospective: the
 point of a MORNING briefing is "what needs my attention today", not a
@@ -23,7 +24,7 @@ from telegram.ext import ContextTypes
 
 import db
 from access import _reject_if_not_allowed
-from formatting import _money, _task_line
+from formatting import _money, _reminder_line, _task_line
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,13 @@ def _morning_briefing_payload(chat_id: int) -> dict:
     due_today_or_overdue = [
         t for t in db.get_open_tasks(chat_id) if t["due_at"] and t["due_at"][:10] <= today_str
     ]
+    # Only the ones NOT already checked off today -- see db.py's "daily
+    # reminders" section for why nothing has to reset this at midnight: a
+    # reminder done yesterday (or never) naturally shows as pending again
+    # the moment today_str() advances, with no separate rollover job.
+    reminders_pending = [
+        r for r in db.get_active_reminders(chat_id) if r["last_done_date"] != today_str
+    ]
 
     y_meals = db.get_meals_in_range(chat_id, yesterday_str, today_str)
     y_workouts = db.get_workouts_in_range(chat_id, yesterday_str, today_str)
@@ -52,6 +60,7 @@ def _morning_briefing_payload(chat_id: int) -> dict:
         "today_str": today_str,
         "status": status,
         "due_today_or_overdue": due_today_or_overdue,
+        "reminders_pending": reminders_pending,
         "yesterday": {
             "calories": sum(m["calories_estimate"] or 0 for m in y_meals) if y_meals else None,
             "water_ml": sum(m["water_ml"] or 0 for m in y_meals) if y_meals else None,
@@ -82,6 +91,13 @@ def _morning_briefing_text(payload: dict) -> str:
         for t in due:
             tag = " [overdue]" if t["due_at"][:10] < payload["today_str"] else ""
             lines.append(f"{_task_line(t)}{tag}")
+
+    reminders_pending = payload["reminders_pending"]
+    if reminders_pending:
+        lines.append("")
+        lines.append("Daily reminders still to do today:")
+        for r in reminders_pending:
+            lines.append(_reminder_line(r))
 
     y = payload["yesterday"]
     if y["calories"] or y["workout_activities"] or y["vitals_checkins"]:

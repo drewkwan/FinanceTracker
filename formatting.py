@@ -87,6 +87,11 @@ def _task_line(row: dict) -> str:
     return f"#{row['id']} {row['title']}{due}{notes}{done_tag}"
 
 
+def _reminder_line(row: dict) -> str:
+    done_tag = " [done today]" if row.get("last_done_date") == db.today_str() else ""
+    return f"#{row['id']} {row['description']}{done_tag}"
+
+
 def _memory_line(row: dict) -> str:
     cat = f" [{row['category']}]" if row.get("category") else ""
     return f"{row['label']}{cat}: {row['content']}"

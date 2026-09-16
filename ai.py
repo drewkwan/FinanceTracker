@@ -5,10 +5,13 @@ Entry points:
   - parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
     recent_tasks, recent_messages, memory_list):
     classifies a free-text chat message into exactly one intent -- logging an
-    expense/meal/workout/vitals check-in or to-do, a correction to something
-    already logged, remembering/forgetting a durable fact, casual chat, or a
-    clarifying question -- and extracts the structured fields needed to act
-    on it. recent_messages (the rolling conversation history) and memory_list
+    expense/meal/workout/vitals check-in, a one-off to-do, a recurring daily
+    reminder (see reminders.py -- distinct from a to-do: it never gets
+    permanently "done", it just recurs until removed), a correction to
+    something already logged, remembering/forgetting a durable fact, casual
+    chat, or a clarifying question -- and extracts the structured fields
+    needed to act on it. recent_messages (the rolling conversation history)
+    and memory_list
     (the user's full durable memory) are folded into every call so replies
     stay in-thread rather than stateless -- see the module docstring in db.py
     for why those two are separate. Never invents a target id/label outside
@@ -79,7 +82,11 @@ COMMAND_LIST = (
     "/memory (list everything currently remembered), /forget <label> (remove a remembered item), "
     "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days), "
     "/addtask <description> (add a to-do, e.g. 'call the dentist tomorrow 5pm'), "
-    "/tasks (show the open to-do list, soonest due first), /done <id> (mark a to-do done)"
+    "/tasks (show the open to-do list, soonest due first), /done <id> (mark a to-do done), "
+    "/addreminder <description> (add a DAILY recurring reminder, e.g. 'take hair pills' -- resurfaces every "
+    "day in the morning briefing until removed, unlike a one-off to-do), /reminders (show all daily reminders), "
+    "/donereminder <id> (mark a daily reminder done for today only -- it comes back tomorrow), "
+    "/removereminder <id> (remove a daily reminder for good)"
 )
 
 PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
@@ -106,7 +113,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "add_reminder" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -168,6 +175,10 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     actually changes the title itself, not just its due date or notes),
   "new_category": one of the category list or null (correction + edit_category only),
 
+  "reminder_description": string or null (add_reminder only -- a short, actionable phrase for the DAILY habit
+    itself, e.g. "take hair pills", "stretch before bed" -- not a full sentence, and never a due date/time,
+    since a daily reminder has no deadline, it just recurs every day),
+
   "memory_label": string or null (remember + forget only -- a short 2-4 word label, e.g. "Tuesday gym plan";
     for "forget", MUST be an existing "label" from the memory list, matched case-insensitively; for "remember",
     reuse an existing label from the memory list if this message is clearly updating that same thing, otherwise
@@ -209,18 +220,25 @@ Deciding the intent:
   never guess a value that wasn't given. This is distinct from log_workout -- a message can report vitals
   only, a workout only, or both (if it clearly reports both, prefer whichever is more specific/detailed and
   let the other be logged in a follow-up message rather than guessing at fields for the one you skip).
-- "log_task": the message is describing one or more new to-dos/reminders to track -- a one-off actionable item,
-  optionally with a deadline (e.g. "remind me to call the dentist tomorrow", "add buy milk to my list", "need
-  to submit the report by friday 5pm", "todo: renew my passport", or a numbered/bulleted list naming several
-  separate to-dos in one message). Put EVERY distinct to-do mentioned as its own object in "tasks", even when
-  there's only one -- it's always a list. Don't stop partway through a list and don't merge several items into
-  one -- a message naming 13 separate to-dos must produce 13 objects, each with its own title (and its own due
-  date/time if one was given for that specific item), not one generic entry. Extract each title as a short,
-  actionable phrase (not a full sentence), due_in_days/due_time only if a due date/time was actually mentioned
-  for that item (never invent one), and notes for any extra detail worth keeping. This is distinct from
-  "remember" -- "remember" is for standing durable facts/goals/preferences with no deadline; "log_task" is for
-  one or more concrete things to be done
-  and then checked off.
+- "log_task": the message is describing one or more new to-dos to track -- a ONE-OFF actionable item, done once
+  and then finished for good, optionally with a deadline (e.g. "remind me to call the dentist tomorrow", "add
+  buy milk to my list", "need to submit the report by friday 5pm", "todo: renew my passport", or a
+  numbered/bulleted list naming several separate to-dos in one message). Put EVERY distinct to-do mentioned as
+  its own object in "tasks", even when there's only one -- it's always a list. Don't stop partway through a
+  list and don't merge several items into one -- a message naming 13 separate to-dos must produce 13 objects,
+  each with its own title (and its own due date/time if one was given for that specific item), not one generic
+  entry. Extract each title as a short, actionable phrase (not a full sentence), due_in_days/due_time only if a
+  due date/time was actually mentioned for that item (never invent one), and notes for any extra detail worth
+  keeping. This is distinct from "remember" (a standing durable FACT/goal/preference with no deadline, nothing
+  to check off) and from "add_reminder" below (a habit that recurs EVERY day, not a one-off item, and never has
+  a due date) -- log_task is only for a concrete, one-off thing to be done once and then checked off for good.
+- "add_reminder": the message is asking to be reminded of the SAME thing EVERY DAY, indefinitely -- a recurring
+  daily habit, not a one-off action with a deadline (e.g. "remind me every day to take my hair pills", "I need
+  to take my vitamins daily, remind me", "add a daily reminder to stretch before bed"). The giveaway is
+  "every day"/"daily"/"each day" (or an obviously habitual framing) with NO specific due date -- if a date or
+  "tomorrow"/"this week" is mentioned instead, that's "log_task", not this. Extract the habit itself into
+  reminder_description, as a short actionable phrase (not a full sentence, and never a date/time -- a daily
+  reminder has no deadline, it just recurs).
 - "correction": the message is about something ALREADY logged, in ANY of the four domains -- fixing the
   currency/amount/description/category/date of a past entry, marking/deleting a to-do, or asking to delete a
   duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
@@ -290,6 +308,11 @@ Deciding the intent:
 - "show_tasks": the message is asking to see the to-do list / what's outstanding (e.g. "what's on my list",
   "what do I need to do", "show me my tasks", "what's still open"). Answered directly with the real open-tasks
   list, same discipline as show_balance/show_recent -- not a casual_reply guessing at what's on it.
+- "show_reminders": the message is asking to see the standing DAILY reminders list specifically (e.g. "what are
+  my daily reminders", "show me my reminders", "what do I have set to remind me every day"). Distinct from
+  "show_tasks" (one-off to-dos) -- if the message is ambiguous between the two, prefer "show_tasks" unless the
+  word "daily"/"reminder"/"every day" is actually used. Answered directly with the real reminders list, same
+  discipline as show_tasks.
 - "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain -- money, food,
   training, and vitals together -- not a single domain's number (e.g. "how am I doing", "how's my week been",
   "give me a rundown", "how am I doing overall", "what's going on with me lately"). This pulls real 7-day
@@ -845,6 +868,7 @@ def _clarify_fallback(message: str) -> dict:
         "knee_pain": None,
         "vitals_notes": None,
         "tasks": None,
+        "reminder_description": None,
         "target_domain": None,
         "target_expense_id": None,
         "correction_action": None,

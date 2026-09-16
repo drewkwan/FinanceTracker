@@ -186,6 +186,15 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                last_done_date TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         # Forward-compatible migration in case this is an existing db from
         # before currency/streak/alert support was added.
         _add_column_if_missing(conn, "users", "last_alert_date", "last_alert_date TEXT")
@@ -1163,3 +1172,97 @@ def restore_deleted_task(chat_id: int, row: dict) -> dict | None:
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_task(chat_id, new_id)
+
+
+# ---------- daily reminders ----------
+#
+# Deliberately its own domain, not just another "task" row: a to-do's
+# "done" is permanent (see mark_task_done), but a daily reminder (e.g.
+# "take hair pills") has no such state -- it recurs forever, every day,
+# until the user removes it entirely. last_done_date tracks only whether
+# TODAY's occurrence has been checked off; nothing has to reset it at
+# midnight -- every read compares it against today_str() itself (see
+# get_active_reminders and formatting._reminder_line), so tomorrow it's
+# automatically "not done" again with no separate rollover job needed,
+# unlike balance's daily rollover.
+
+def add_reminder(chat_id: int, description: str) -> int:
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO daily_reminders (chat_id, description) VALUES (?, ?)",
+            (chat_id, description),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_reminder(chat_id: int, reminder_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM daily_reminders WHERE id = ? AND chat_id = ?", (reminder_id, chat_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_active_reminders(chat_id: int, limit: int = 40) -> list[dict]:
+    """Every standing daily reminder for this chat, oldest first (the order
+    they were added in -- there's no due date to sort by, unlike tasks).
+    Feeds /reminders, the natural-language show_reminders intent, and the
+    morning briefing -- callers filter by last_done_date themselves for
+    "still pending today" (see morning._morning_briefing_payload)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM daily_reminders WHERE chat_id = ? ORDER BY id LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_reminder_done_today(chat_id: int, reminder_id: int) -> dict | None:
+    row = get_reminder(chat_id, reminder_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE daily_reminders SET last_done_date = ? WHERE id = ? AND chat_id = ?",
+            (today_str(), reminder_id, chat_id),
+        )
+    return get_reminder(chat_id, reminder_id)
+
+
+def unmark_reminder_done_today(chat_id: int, reminder_id: int) -> dict | None:
+    """Undo for mark_reminder_done_today. Clears last_done_date back to
+    NULL rather than restoring whatever it happened to be before -- the
+    only thing that ever mattered for display/briefing purposes is whether
+    it equals TODAY (see get_active_reminders' docstring), and a mark-done
+    can only be undone as the single next message anyway (see
+    correction.LAST_CORRECTION_KEY), so the prior value was never today's
+    date to begin with."""
+    row = get_reminder(chat_id, reminder_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE daily_reminders SET last_done_date = NULL WHERE id = ? AND chat_id = ?",
+            (reminder_id, chat_id),
+        )
+    return get_reminder(chat_id, reminder_id)
+
+
+def delete_reminder(chat_id: int, reminder_id: int) -> dict | None:
+    row = get_reminder(chat_id, reminder_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM daily_reminders WHERE id = ? AND chat_id = ?", (reminder_id, chat_id))
+    return row
+
+
+def restore_deleted_reminder(chat_id: int, row: dict) -> dict | None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO daily_reminders (chat_id, description, last_done_date) VALUES (?, ?, ?)",
+            (chat_id, row["description"], row["last_done_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_reminder(chat_id, new_id)

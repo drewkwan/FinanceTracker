@@ -29,6 +29,11 @@ Commands:
   /addtask <description>  add a to-do, e.g. "call the dentist tomorrow 5pm"
   /tasks                  show the open to-do list, soonest due first
   /done <id>              mark a to-do done
+  /addreminder <description>   add a DAILY recurring reminder, e.g. "take hair pills" (recurs every
+                          day until removed -- unlike a to-do, which is one-off)
+  /reminders              show all daily reminders
+  /donereminder <id>      mark a daily reminder done for today only (comes back tomorrow)
+  /removereminder <id>    remove a daily reminder for good
 
 You can also just type naturally, e.g. "spent 15 on uber" or
 "paid 20 USD for taxi, claimable" and the bot will parse, categorize, and
@@ -90,6 +95,7 @@ from formatting import (
     _meal_line,
     _memory_line,
     _money,
+    _reminder_line,
     _status_text,
     _task_line,
     _vitals_line,
@@ -112,6 +118,14 @@ from nutrition import (
     handle_photo,
     logmeal_cmd,
     recentmeals,
+)
+from reminders import (
+    _add_reminder_and_reply,
+    _reminders_text,
+    addreminder_cmd,
+    donereminder_cmd,
+    reminders_cmd,
+    removereminder_cmd,
 )
 from replies import _reply, _send_alert_if_needed
 from rundown import RUNDOWN_WINDOW_DAYS, _rundown_fallback_text, _rundown_payload, _rundown_reply_text, rundown_cmd

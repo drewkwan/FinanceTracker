@@ -42,6 +42,7 @@ from handlers import handle_text, on_error
 from memory import forget_cmd, memory_cmd
 from morning import morning_briefing_tick, morning_cmd
 from nutrition import handle_photo, logmeal_cmd, recentmeals
+from reminders import addreminder_cmd, donereminder_cmd, reminders_cmd, removereminder_cmd
 from rundown import rundown_cmd
 from summary import summary
 from tasks import addtask_cmd, done_cmd, tasks_cmd
@@ -80,6 +81,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Add a to-do: /addtask call the dentist tomorrow 5pm\n"
         "See what's open: /tasks\n"
         "Mark one done: /done <id>\n\n"
+        "Add a daily reminder (recurs every day, e.g. take hair pills): /addreminder take hair pills\n"
+        "See your daily reminders: /reminders\n"
+        "Mark one done for today only (comes back tomorrow): /donereminder <id>\n"
+        "Remove one for good: /removereminder <id>\n\n"
         "How's everything going, across money/food/training/vitals together: /rundown\n"
         "See today's briefing (today's budget + due to-dos + a look back at yesterday) any time: /morning\n\n"
         "Or just tell me naturally, e.g. \"spent 15 on uber\", \"had a mango\", \"played tennis for an hour\", "
@@ -146,6 +151,10 @@ def main():
     app.add_handler(CommandHandler("addtask", addtask_cmd))
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("addreminder", addreminder_cmd))
+    app.add_handler(CommandHandler("reminders", reminders_cmd))
+    app.add_handler(CommandHandler("donereminder", donereminder_cmd))
+    app.add_handler(CommandHandler("removereminder", removereminder_cmd))
     app.add_handler(CommandHandler("morning", morning_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

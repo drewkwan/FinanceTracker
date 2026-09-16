@@ -23,6 +23,7 @@ from fitness import _force_log_workout_and_reply
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply
+from reminders import _add_reminder_and_reply, _reminders_text
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
 from rundown import _rundown_reply_text
 from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
@@ -230,6 +231,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intent == "show_tasks":
         context.chat_data.pop(PENDING_KEY, None)
         await _reply(update, chat_id, _tasks_text(chat_id))
+        return
+
+    if intent == "add_reminder":
+        context.chat_data.pop(PENDING_KEY, None)
+        description = parsed.get("reminder_description")
+        if not description:
+            await _reply(update, chat_id, "What should I remind you about every day?")
+            return
+        await _add_reminder_and_reply(update, chat_id, description)
+        return
+
+    if intent == "show_reminders":
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(update, chat_id, _reminders_text(chat_id))
         return
 
     if intent == "remember":

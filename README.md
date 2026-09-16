@@ -187,7 +187,10 @@ Unlike `/rundown`'s 7-day retrospective, the briefing is forward-looking:
 today's target, rolled-over balance, and streak; any open to-do that's due
 today or already overdue (an undated to-do, or one due later this week,
 isn't something that needs attention *this morning* specifically — `/tasks`
-still shows the full list); and, for light context, a one-line look back at
+still shows the full list); any daily reminder not yet checked off today
+(see "How daily reminders work" below — it drops off this list the moment
+it's marked done for the day, and comes back on its own tomorrow with no
+separate reset job); and, for light context, a one-line look back at
 just yesterday (calories eaten, workouts, vitals check-ins). There's no AI
 narration step here at all — every figure is computed directly the same
 "never let the model guess a number" way as `/rundown`, but skipping the
@@ -230,6 +233,36 @@ startup log warning), but `/morning` still works on demand regardless.
   one-word `undo` like every other correction, restoring the exact prior
   title/due date/notes.
 
+## How daily reminders work
+
+- **Not the same thing as a to-do.** A to-do (`/addtask`) is one-off — done
+  once, checked off for good. A daily reminder (`/addreminder`) is a standing
+  habit (e.g. "take hair pills", "stretch before bed") that resurfaces every
+  single day, forever, until you remove it — nothing ever marks it "done"
+  permanently.
+- **Add one** with `/addreminder <description>` or naturally — "remind me
+  every day to take my hair pills", "add a daily reminder to stretch before
+  bed". The giveaway phrase is "every day"/"daily"/"each day"; a message with
+  an actual deadline instead ("tomorrow", "by friday") is a to-do, not this.
+- **Shows up in your morning briefing automatically**, every day, until it's
+  either checked off for that day or removed — see "How the morning briefing
+  works" above. `/reminders` shows the full standing list any time (including
+  ones already done today, tagged `[done today]`, so it stays a stable
+  reference of everything you've set, not just what's left).
+- **Mark one done for today** with `/donereminder <id>` — it comes right
+  back tomorrow; this only checks off *today's* occurrence, not the
+  reminder itself. **Remove one for good** with `/removereminder <id>`.
+  Both reverse with one-word `undo`, same as every other correction.
+- **Marking done or removing is command-only right now** (`/donereminder
+  <id>` / `/removereminder <id>`), not yet natural language — adding one and
+  viewing the list both work conversationally, but resolving an existing
+  reminder by name in free text (rather than by id) isn't wired up yet. Come
+  back to this if it turns out to matter in practice.
+- **No separate daily reset job needed.** "Done today" is just a stored date
+  compared against today's real date (BOT_TIMEZONE-aware, see the day-boundary
+  note above) every time it's read — so a reminder checked off yesterday is
+  automatically pending again today, with nothing needing to run at midnight.
+
 ## Files
 
 | File | Purpose |
@@ -237,6 +270,7 @@ startup log warning), but `/morning` still works on demand regardless.
 | `bot.py` | Thin facade re-exporting every domain module's names (see its own docstring) |
 | `app.py` | Entrypoint: builds the bot, registers every handler, the periodic rollover job |
 | `morning.py` | The daily morning briefing (`/morning` + the automatic proactive push) |
+| `reminders.py` | Daily recurring reminders (`/addreminder`, `/reminders`, `/donereminder`, `/removereminder`) |
 | `db.py` | SQLite schema + all balance/rollover/claimable/streak/alert logic |
 | `fx.py` | Currency conversion (Frankfurter/ECB rates, cached, with 1:1 fallback) |
 | `ai.py` | Claude calls: natural-language parsing, categorization, on-demand summaries |
@@ -342,9 +376,15 @@ Message your bot on Telegram — `/start` should reply immediately.
 /tasks                            show the open to-do list, soonest due first
 /done <id>                        mark a to-do done
 
+/addreminder <description>        add a DAILY recurring reminder, e.g. /addreminder take hair pills
+/reminders                        show all daily reminders (done-today ones tagged)
+/donereminder <id>                mark a daily reminder done for today only -- comes back tomorrow
+/removereminder <id>              remove a daily reminder for good
+
 /rundown                         cross-domain check-in: money + food + training + vitals, last 7 days
-/morning                         today's briefing: budget + due/overdue to-dos + a look back at yesterday
-                                  (also sent automatically once a day -- see "How the morning briefing works")
+/morning                         today's briefing: budget + due/overdue to-dos + reminders + a look back
+                                  at yesterday (also sent automatically once a day -- see "How the morning
+                                  briefing works")
 ```
 
 Or skip commands and just type naturally:
