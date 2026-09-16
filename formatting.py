@@ -92,6 +92,14 @@ def _reminder_line(row: dict) -> str:
     return f"#{row['id']} {row['description']}{done_tag}"
 
 
+def _event_line(row: dict) -> str:
+    when = row["event_date"]
+    if row.get("event_time"):
+        when += f" {row['event_time']}"
+    notes = f" -- {row['notes']}" if row.get("notes") else ""
+    return f"#{row['id']} {row['title']} (scheduled {when}){notes}"
+
+
 def _memory_line(row: dict) -> str:
     cat = f" [{row['category']}]" if row.get("category") else ""
     return f"{row['label']}{cat}: {row['content']}"

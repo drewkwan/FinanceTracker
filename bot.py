@@ -34,6 +34,10 @@ Commands:
   /reminders              show all daily reminders
   /donereminder <id>      mark a daily reminder done for today only (comes back tomorrow)
   /removereminder <id>    remove a daily reminder for good
+  /addevent <description> add a one-off scheduled event, e.g. "dinner with Mel next Monday"
+  /events                  show what's coming up
+  /rescheduleevent <id> <days from today>   move an event to a new day
+  /removeevent <id>       remove a scheduled event
 
 You can also just type naturally, e.g. "spent 15 on uber" or
 "paid 20 USD for taxi, claimable" and the bot will parse, categorize, and
@@ -80,6 +84,15 @@ from finance import (
     settarget,
     undo,
 )
+from events import (
+    _add_event_and_reply,
+    _add_events_and_reply,
+    _events_text,
+    addevent_cmd,
+    events_cmd,
+    removeevent_cmd,
+    rescheduleevent_cmd,
+)
 from fitness import (
     _find_duplicate_workout,
     _force_log_workout_and_reply,
@@ -91,6 +104,7 @@ from formatting import (
     _calorie_range,
     _daily_calorie_balance_text,
     _daily_meal_totals_text,
+    _event_line,
     _expense_line,
     _meal_line,
     _memory_line,

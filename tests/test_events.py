@@ -1,0 +1,315 @@
+"""
+Tests for the scheduled-events domain: db.py CRUD (including
+get_upcoming_events' date/time ordering and its "today forward only"
+filtering), formatting._event_line, ai.py's extract_event resilience,
+events.py's commands (including reschedule) and undo, the natural-language
+add_event/show_events intents (single event and a multi-day batch, mirroring
+log_task's list discipline), and the morning briefing's "Coming up" section
+(including its lookahead-window cutoff). Same discipline as test_tasks.py/
+test_reminders.py: no real network, no real Claude calls (ai._get_client is
+always mocked), throwaway SQLite per test.
+"""
+
+import asyncio
+import datetime as dt
+import json
+
+import ai
+import bot
+import db
+from conftest import CHAT
+from test_ai import _mock_client
+from test_meals_workouts import FakeContext, FakeUpdate
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _in_days(n):
+    return (dt.date.today() + dt.timedelta(days=n)).isoformat()
+
+
+# ---------- db.py: events ----------
+
+def test_add_and_get_event_roundtrip():
+    event_id = db.add_event(CHAT, "Dinner with Mel", _in_days(3), event_time="19:00", notes="Their place")
+    row = db.get_event(CHAT, event_id)
+    assert row["title"] == "Dinner with Mel"
+    assert row["event_date"] == _in_days(3)
+    assert row["event_time"] == "19:00"
+    assert row["notes"] == "Their place"
+
+
+def test_get_upcoming_events_orders_by_date_then_time():
+    db.add_event(CHAT, "later day", _in_days(5))
+    db.add_event(CHAT, "same day, later time", _in_days(1), event_time="18:00")
+    db.add_event(CHAT, "same day, earlier time", _in_days(1), event_time="09:00")
+    db.add_event(CHAT, "same day, no time", _in_days(1))
+    titles = [r["title"] for r in db.get_upcoming_events(CHAT)]
+    assert titles == ["same day, earlier time", "same day, later time", "same day, no time", "later day"]
+
+
+def test_get_upcoming_events_excludes_the_past():
+    db.add_event(CHAT, "yesterday's thing", (dt.date.today() - dt.timedelta(days=1)).isoformat())
+    db.add_event(CHAT, "today's thing", _in_days(0))
+    titles = [r["title"] for r in db.get_upcoming_events(CHAT)]
+    assert titles == ["today's thing"]
+
+
+def test_edit_event_date_reschedules():
+    event_id = db.add_event(CHAT, "Company Tennis", _in_days(2))
+    updated = db.edit_event_date(CHAT, event_id, _in_days(5))
+    assert updated["event_date"] == _in_days(5)
+
+
+def test_delete_and_restore_event_roundtrip():
+    event_id = db.add_event(CHAT, "Dentist", _in_days(2), event_time="15:00", notes="bring insurance card")
+    deleted = db.delete_event(CHAT, event_id)
+    assert db.get_event(CHAT, event_id) is None
+    restored = db.restore_deleted_event(CHAT, deleted)
+    assert restored["title"] == "Dentist"
+    assert restored["event_time"] == "15:00"
+    assert restored["notes"] == "bring insurance card"
+    assert restored["id"] != event_id
+
+
+# ---------- formatting._event_line ----------
+
+def test_event_line_includes_time_and_notes_when_present():
+    row = {"id": 1, "title": "Dinner with Mel", "event_date": "2026-09-21", "event_time": "19:00",
+           "notes": "their place"}
+    line = bot._event_line(row)
+    assert "#1 Dinner with Mel" in line
+    assert "2026-09-21 19:00" in line
+    assert "their place" in line
+
+
+def test_event_line_omits_time_and_notes_when_absent():
+    row = {"id": 2, "title": "Pull day", "event_date": "2026-09-21", "event_time": None, "notes": None}
+    line = bot._event_line(row)
+    assert line == "#2 Pull day (scheduled 2026-09-21)"
+
+
+# ---------- ai.py: extract_event ----------
+
+def test_extract_event_happy_path(monkeypatch):
+    payload = {"title": "Dinner with Mel", "event_in_days": 6, "event_time": "19:00", "notes": None}
+    _mock_client(monkeypatch, json.dumps(payload))
+    result = ai.extract_event("dinner with Mel next Monday at 7pm")
+    assert result["title"] == "Dinner with Mel"
+    assert result["event_in_days"] == 6
+    assert result["event_time"] == "19:00"
+
+
+def test_extract_event_never_raises_on_api_failure(monkeypatch):
+    _mock_client(monkeypatch, ConnectionError("network blip"))
+    result = ai.extract_event("dinner with Mel")
+    assert result["title"] == "dinner with Mel"  # raw text preserved rather than lost
+    assert result["event_in_days"] is None
+
+
+# ---------- /addevent, /events ----------
+
+def test_addevent_command_uses_extract_event_and_computes_date(monkeypatch):
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(bot.ai, "extract_event", lambda desc: {
+        "title": "Dinner with Mel", "event_in_days": 6, "event_time": "19:00", "notes": None,
+    })
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = ["dinner", "with", "Mel", "next", "Monday"]
+    _run(bot.addevent_cmd(update, context))
+    assert any("Dinner with Mel" in r for r in update.message.replies)
+    row = db.get_upcoming_events(CHAT)[0]
+    assert row["event_date"] == _in_days(6)
+    assert row["event_time"] == "19:00"
+
+
+def test_addevent_command_with_no_extractable_day_asks_instead_of_guessing(monkeypatch):
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(bot.ai, "extract_event", lambda desc: {
+        "title": "Dinner with Mel", "event_in_days": None, "event_time": None, "notes": None,
+    })
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = ["dinner", "with", "Mel"]
+    _run(bot.addevent_cmd(update, context))
+    assert db.get_upcoming_events(CHAT) == []
+    assert any("What day" in r for r in update.message.replies)
+
+
+def test_events_command_lists_upcoming():
+    db.get_or_create_user(CHAT)
+    db.add_event(CHAT, "Dinner with Mel", _in_days(3))
+    update = FakeUpdate(CHAT)
+    _run(bot.events_cmd(update, FakeContext()))
+    assert any("Dinner with Mel" in r for r in update.message.replies)
+
+
+def test_events_command_with_none_set():
+    db.get_or_create_user(CHAT)
+    update = FakeUpdate(CHAT)
+    _run(bot.events_cmd(update, FakeContext()))
+    assert any("Nothing on your schedule" in r for r in update.message.replies)
+
+
+# ---------- /rescheduleevent + undo ----------
+
+def test_rescheduleevent_command_and_undo():
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Company Tennis", _in_days(2))
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = [str(event_id), "5"]
+    _run(bot.rescheduleevent_cmd(update, context))
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(5)
+    assert any("Rescheduled" in r for r in update.message.replies)
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(2)
+
+
+def test_rescheduleevent_command_with_unknown_id():
+    db.get_or_create_user(CHAT)
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = ["9999", "1"]
+    _run(bot.rescheduleevent_cmd(update, context))
+    assert any("Couldn't find" in r for r in update.message.replies)
+
+
+# ---------- /removeevent + undo ----------
+
+def test_removeevent_command_and_undo():
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Company Tennis", _in_days(2))
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = [str(event_id)]
+    _run(bot.removeevent_cmd(update, context))
+    assert db.get_event(CHAT, event_id) is None
+    assert any("Removed" in r for r in update.message.replies)
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_upcoming_events(CHAT)[0]["title"] == "Company Tennis"
+
+
+def test_removeevent_command_with_unknown_id():
+    db.get_or_create_user(CHAT)
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = ["9999"]
+    _run(bot.removeevent_cmd(update, context))
+    assert any("Couldn't find" in r for r in update.message.replies)
+
+
+# ---------- natural language: add_event / show_events ----------
+
+def test_natural_language_add_single_event_computes_date_deterministically(monkeypatch):
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "add_event",
+            "events": [{"event_title": "Dinner with Mel", "event_in_days": 6, "event_time": None,
+                        "event_notes": None}],
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="dinner with Mel next Monday")
+    _run(bot.handle_text(update, FakeContext()))
+    assert any("Dinner with Mel" in r for r in update.message.replies)
+    row = db.get_upcoming_events(CHAT)[0]
+    assert row["event_date"] == _in_days(6)
+
+
+def test_natural_language_add_event_with_no_events_asks_instead_of_guessing(monkeypatch):
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+        return {"intent": "add_event", "events": [], "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="add that to my schedule")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_upcoming_events(CHAT) == []
+    assert any("didn't catch" in r for r in update.message.replies)
+
+
+def test_natural_language_add_a_weeks_worth_of_events_logs_every_one(monkeypatch):
+    """Mirrors log_task's multi-item regression test -- a week's workout plan
+    named day by day must produce one event per day, not one merged or
+    dropped entry."""
+    db.get_or_create_user(CHAT)
+    plan = [
+        ("Pull day in the gym", 0), ("Run intervals", 1), ("Company Tennis", 2),
+        ("Push day in the gym", 3), ("Easy 5km", 4), ("IPPT time trial", 5), ("Rest", 6),
+    ]
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+        return {
+            "intent": "add_event",
+            "events": [{"event_title": t, "event_in_days": n, "event_time": None, "event_notes": None}
+                       for t, n in plan],
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="ok cool can you log that in to my schedule for the week")
+    _run(bot.handle_text(update, FakeContext()))
+
+    reply = update.message.replies[-1]
+    assert "Added 7 to your schedule" in reply
+    assert "Rest" in reply, "the last item must not be dropped"
+
+    upcoming_titles = {r["title"] for r in db.get_upcoming_events(CHAT)}
+    assert upcoming_titles == {t for t, _ in plan}
+
+
+def test_natural_language_show_events(monkeypatch):
+    db.get_or_create_user(CHAT)
+    db.add_event(CHAT, "Dinner with Mel", _in_days(3))
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+        return {"intent": "show_events", "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="what's on my schedule")
+    _run(bot.handle_text(update, FakeContext()))
+    assert any("Dinner with Mel" in r for r in update.message.replies)
+
+
+# ---------- morning briefing integration ----------
+
+def test_morning_briefing_includes_upcoming_events_within_the_lookahead_window():
+    db.get_or_create_user(CHAT)
+    db.add_event(CHAT, "Dinner with Mel", _in_days(3))
+    payload = bot._morning_briefing_payload(CHAT)
+    assert [e["title"] for e in payload["events_upcoming"]] == ["Dinner with Mel"]
+    text = bot._morning_briefing_text(payload)
+    assert "Coming up" in text
+    assert "Dinner with Mel" in text
+
+
+def test_morning_briefing_excludes_events_beyond_the_lookahead_window():
+    db.get_or_create_user(CHAT)
+    db.add_event(CHAT, "Something far off", _in_days(30))
+    payload = bot._morning_briefing_payload(CHAT)
+    assert payload["events_upcoming"] == []
+    text = bot._morning_briefing_text(payload)
+    assert "Coming up" not in text
+
+
+def test_morning_briefing_omits_the_events_section_entirely_with_nothing_scheduled():
+    db.get_or_create_user(CHAT)
+    payload = bot._morning_briefing_payload(CHAT)
+    text = bot._morning_briefing_text(payload)
+    assert "Coming up" not in text

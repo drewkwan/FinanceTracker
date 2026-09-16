@@ -7,10 +7,12 @@ Entry points:
     classifies a free-text chat message into exactly one intent -- logging an
     expense/meal/workout/vitals check-in, a one-off to-do, a recurring daily
     reminder (see reminders.py -- distinct from a to-do: it never gets
-    permanently "done", it just recurs until removed), a correction to
-    something already logged, remembering/forgetting a durable fact, casual
-    chat, or a clarifying question -- and extracts the structured fields
-    needed to act on it. recent_messages (the rolling conversation history)
+    permanently "done", it just recurs until removed), a flat scheduled
+    event/appointment (see events.py -- distinct from both: a specific dated
+    occurrence, no "done" state, not recurring), a correction to something
+    already logged, remembering/forgetting a durable fact, casual chat, or a
+    clarifying question -- and extracts the structured fields needed to act
+    on it. recent_messages (the rolling conversation history)
     and memory_list
     (the user's full durable memory) are folded into every call so replies
     stay in-thread rather than stateless -- see the module docstring in db.py
@@ -29,6 +31,10 @@ Entry points:
     extract_meal.
   - extract_task(description): used by /addtask the same way, extracting a
     title, a due-in-days count, an optional due time, and notes.
+  - extract_event(description): used by /addevent the same way, extracting a
+    title, an event-in-days count, an optional clock time, and notes -- for a
+    flat, one-off scheduled event/appointment (see events.py's module
+    docstring for why this is deliberately not a recurring-event system yet).
   - answer_with_data(question, context_rows): used for on-demand analytics,
     turns raw category totals into a short natural-language answer.
   - answer_with_trends(period, payload): the /summary trend narrative.
@@ -86,7 +92,11 @@ COMMAND_LIST = (
     "/addreminder <description> (add a DAILY recurring reminder, e.g. 'take hair pills' -- resurfaces every "
     "day in the morning briefing until removed, unlike a one-off to-do), /reminders (show all daily reminders), "
     "/donereminder <id> (mark a daily reminder done for today only -- it comes back tomorrow), "
-    "/removereminder <id> (remove a daily reminder for good)"
+    "/removereminder <id> (remove a daily reminder for good), "
+    "/addevent <description> (add a one-off scheduled event/appointment, e.g. 'dinner with Mel next Monday'), "
+    "/events (show what's coming up), "
+    "/rescheduleevent <id> <days from today> (move an event to a new day), "
+    "/removeevent <id> (remove a scheduled event)"
 )
 
 PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
@@ -113,7 +123,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "add_reminder" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "add_reminder" | "add_event" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "show_events" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -179,6 +189,16 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     itself, e.g. "take hair pills", "stretch before bed" -- not a full sentence, and never a due date/time,
     since a daily reminder has no deadline, it just recurs every day),
 
+  "events": [list of one or more objects, add_event only -- ALWAYS a list, even for a single appointment, and
+    however many distinct events are named in the message -- a week's workout plan named day by day (e.g.
+    "Monday pull day, Tuesday run intervals, Wednesday tennis...") means one object per day, not one merged
+    entry] each shaped: {{"event_title": short description of what's happening, e.g. "Dinner with Mel", "Pull
+    day in the gym", "event_in_days": integer count of days from today (0 = today, 1 = tomorrow, 2 = day after,
+    etc.) -- REQUIRED for an event to be logged; if genuinely no day can be determined for an item, still
+    include the object with event_in_days null rather than dropping it, "event_time": "HH:MM" 24-hour time or
+    null (ONLY if a specific clock time was mentioned for this item), "event_notes": string or null (any extra
+    detail worth keeping)}},
+
   "memory_label": string or null (remember + forget only -- a short 2-4 word label, e.g. "Tuesday gym plan";
     for "forget", MUST be an existing "label" from the memory list, matched case-insensitively; for "remember",
     reuse an existing label from the memory list if this message is clearly updating that same thing, otherwise
@@ -239,6 +259,18 @@ Deciding the intent:
   "tomorrow"/"this week" is mentioned instead, that's "log_task", not this. Extract the habit itself into
   reminder_description, as a short actionable phrase (not a full sentence, and never a date/time -- a daily
   reminder has no deadline, it just recurs).
+- "add_event": the message is naming a specific, ONE-OFF thing scheduled to happen on a particular day -- an
+  appointment, a plan with someone, or a slot on a schedule (e.g. "dinner with Mel next Monday", "I have a
+  dentist appointment Thursday at 3pm", "log that into my schedule for the week" following a proposed workout
+  plan naming each day, "add company tennis to my schedule for Wednesday"). Distinct from "log_task" (a to-do
+  to be actively DONE and checked off -- an event just happens, on the calendar, nothing to mark complete) and
+  from "add_reminder" (a habit that recurs EVERY day forever, not a single dated occurrence). If the message
+  lays out several days at once (e.g. a full week's workout plan, one line per day), put EVERY distinct day's
+  event as its own object in "events", even when there's only one -- it's always a list; don't merge multiple
+  days into one entry or stop partway through. A message that's ambiguous between "add_event" and "log_task"
+  (no clear deadline-vs-appointment framing) should prefer "log_task" -- events are for things with a specific
+  scheduled day the user framed as an appointment/plan/schedule slot, not for general to-dos that happen to
+  have a date.
 - "correction": the message is about something ALREADY logged, in ANY of the four domains -- fixing the
   currency/amount/description/category/date of a past entry, marking/deleting a to-do, or asking to delete a
   duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
@@ -313,6 +345,11 @@ Deciding the intent:
   "show_tasks" (one-off to-dos) -- if the message is ambiguous between the two, prefer "show_tasks" unless the
   word "daily"/"reminder"/"every day" is actually used. Answered directly with the real reminders list, same
   discipline as show_tasks.
+- "show_events": the message is asking to see the schedule / what's coming up (e.g. "what's on my schedule",
+  "what do I have coming up", "am I free next Monday", "what's my workout plan for this week look like now").
+  Distinct from "show_tasks" (to-dos to actively do) and "show_reminders" (daily habits) -- this is specifically
+  about dated appointments/events already on the calendar. Answered directly with the real upcoming-events
+  list, same discipline as show_tasks/show_reminders.
 - "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain -- money, food,
   training, and vitals together -- not a single domain's number (e.g. "how am I doing", "how's my week been",
   "give me a rundown", "how am I doing overall", "what's going on with me lately"). This pulls real 7-day
@@ -406,6 +443,18 @@ Rules for log_task fields (apply per item in "tasks"):
   objects in "tasks" -- one per line -- never collapsed into a single item or truncated partway through the
   list. Each line's own wording (a name, a timeframe like "tonight"/"this week") stays with that line's object
   only; don't let one line's due date leak onto another's.
+
+Rules for add_event fields (apply per item in "events"):
+- event_title should be short and specific (e.g. "Dinner with Mel", "Pull day in the gym"), not a full sentence.
+- event_in_days is a plain count of days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) -- the same
+  forward day-count discipline as log_task's due_in_days, and just as deliberately never an actual calendar
+  date (that's computed in code). This is the one field that actually matters for an event -- if it genuinely
+  can't be determined for an item, still include the object with event_in_days null (the bot will ask, or skip
+  just that one item in a multi-item batch) rather than silently dropping the item.
+- event_time is only set if a specific clock time was mentioned for that item; leave it null otherwise.
+- A week's workout plan (or any multi-day schedule) named day by day in one message must become one object per
+  day in "events" -- never collapsed into a single entry, and never let one day's activity or time leak onto
+  another's.
 
 Rules for remember/forget fields:
 - memory_content should read as a standalone fact -- someone reading only that content later, with no other
@@ -736,6 +785,36 @@ def extract_task(description: str) -> dict:
         return fallback
 
 
+EVENT_EXTRACT_SYSTEM_PROMPT = """You extract a scheduled one-off event/appointment from a short description. \
+Reply with ONLY a JSON object: {"title": short specific description of what's happening (e.g. "Dinner with \
+Mel", "Dentist appointment"), "event_in_days": integer count of days from today (0 = today, 1 = tomorrow, 2 = \
+day after, etc.) or null if no day could be determined, "event_time": "HH:MM" 24-hour time ONLY if a specific \
+clock time was mentioned (e.g. "at 3pm" -> "15:00"), else null, "notes": a short string capturing anything else \
+worth keeping, or null}. Never invent a day or time that wasn't mentioned."""
+
+
+def extract_event(description: str) -> dict:
+    """Used by /addevent for a known description -- same division of labor as
+    extract_task. Never raises -- falls back to the raw text as the title
+    with no day (the caller then asks what day it's on) rather than
+    blocking the add if the Claude call fails."""
+    fallback = {"title": description or "event", "event_in_days": None, "event_time": None, "notes": None}
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=150,
+            system=EVENT_EXTRACT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": description or "event"}],
+        )
+        raw = resp.content[0].text.strip()
+        data = _parse_json_or_none(raw)
+        return data if data else fallback
+    except Exception:
+        logger.exception("extract_event: Claude call failed, falling back to the raw description")
+        return fallback
+
+
 def answer_with_data(question: str, rows: list) -> str:
     """rows: list of {category, total, n} dicts. Returns a short natural-language summary."""
     client = _get_client()
@@ -869,6 +948,7 @@ def _clarify_fallback(message: str) -> dict:
         "vitals_notes": None,
         "tasks": None,
         "reminder_description": None,
+        "events": None,
         "target_domain": None,
         "target_expense_id": None,
         "correction_action": None,

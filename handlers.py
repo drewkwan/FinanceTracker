@@ -23,6 +23,7 @@ from fitness import _force_log_workout_and_reply
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply
+from events import _add_events_and_reply, _events_text
 from reminders import _add_reminder_and_reply, _reminders_text
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
 from rundown import _rundown_reply_text
@@ -245,6 +246,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intent == "show_reminders":
         context.chat_data.pop(PENDING_KEY, None)
         await _reply(update, chat_id, _reminders_text(chat_id))
+        return
+
+    if intent == "add_event":
+        context.chat_data.pop(PENDING_KEY, None)
+        events = parsed.get("events") or []
+        if not events:
+            await _reply(update, chat_id, "I didn't catch what to schedule -- try describing it again.")
+            return
+        await _add_events_and_reply(update, chat_id, events)
+        return
+
+    if intent == "show_events":
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(update, chat_id, _events_text(chat_id))
         return
 
     if intent == "remember":

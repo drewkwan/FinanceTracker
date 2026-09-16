@@ -36,6 +36,7 @@ from finance import (
     settarget,
     undo,
 )
+from events import addevent_cmd, events_cmd, removeevent_cmd, rescheduleevent_cmd
 from fitness import logworkout_cmd, recentworkouts
 from formatting import _money, _status_text
 from handlers import handle_text, on_error
@@ -85,12 +86,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "See your daily reminders: /reminders\n"
         "Mark one done for today only (comes back tomorrow): /donereminder <id>\n"
         "Remove one for good: /removereminder <id>\n\n"
+        "Add a scheduled event/appointment: /addevent dinner with Mel next Monday\n"
+        "See what's coming up: /events\n"
+        "Move one to a new day: /rescheduleevent <id> <days from today>\n"
+        "Remove one: /removeevent <id>\n\n"
         "How's everything going, across money/food/training/vitals together: /rundown\n"
         "See today's briefing (today's budget + due to-dos + a look back at yesterday) any time: /morning\n\n"
         "Or just tell me naturally, e.g. \"spent 15 on uber\", \"had a mango\", \"played tennis for an hour\", "
         "\"weight 76.6, slept 5.5 hours\", \"remember I go to Fitness First Bugis Tue/Thu\", \"remind me to call "
-        "the dentist tomorrow\", or \"how am I doing this week\" -- and just talk to me the rest of the time, "
-        "I'll keep up with the thread."
+        "the dentist tomorrow\", \"dinner with Mel next Monday\", or \"how am I doing this week\" -- and just "
+        "talk to me the rest of the time, I'll keep up with the thread."
     )
 
 
@@ -155,6 +160,10 @@ def main():
     app.add_handler(CommandHandler("reminders", reminders_cmd))
     app.add_handler(CommandHandler("donereminder", donereminder_cmd))
     app.add_handler(CommandHandler("removereminder", removereminder_cmd))
+    app.add_handler(CommandHandler("addevent", addevent_cmd))
+    app.add_handler(CommandHandler("events", events_cmd))
+    app.add_handler(CommandHandler("rescheduleevent", rescheduleevent_cmd))
+    app.add_handler(CommandHandler("removeevent", removeevent_cmd))
     app.add_handler(CommandHandler("morning", morning_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

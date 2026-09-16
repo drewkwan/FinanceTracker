@@ -195,6 +195,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                event_time TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         # Forward-compatible migration in case this is an existing db from
         # before currency/streak/alert support was added.
         _add_column_if_missing(conn, "users", "last_alert_date", "last_alert_date TEXT")
@@ -1266,3 +1277,87 @@ def restore_deleted_reminder(chat_id: int, row: dict) -> dict | None:
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_reminder(chat_id, new_id)
+
+
+# ---------- scheduled events ----------
+#
+# Flat, one-off dated entries (e.g. "Dinner with Mel next Monday", or a
+# week's worth of workout-plan slots) -- distinct from both to-dos (no
+# due/overdue framing, no "done" state -- an event just passes by date, it's
+# never checked off) and daily reminders (a single occurrence, not a
+# recurring-forever habit). Deliberately NOT modeling true recurrence yet
+# (e.g. "Company Tennis every Wednesday") -- see events.py's module
+# docstring for the reasoning; a genuinely recurring rule needs day-of-week/
+# interval matching plus the "edit one occurrence vs. all future
+# occurrences" problem, neither of which exists anywhere in this codebase
+# yet, and the concrete near-term driver (a week's workout plan) is really
+# just several flat dated rows, not a recurring rule.
+
+def add_event(chat_id: int, title: str, event_date: str, event_time: str | None = None,
+              notes: str | None = None) -> int:
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO events (chat_id, title, event_date, event_time, notes) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, title, event_date, event_time, notes),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_event(chat_id: int, event_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM events WHERE id = ? AND chat_id = ?", (event_id, chat_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_upcoming_events(chat_id: int, from_date: str | None = None, limit: int = 40) -> list[dict]:
+    """Events from from_date (defaults to today) forward, soonest first --
+    an event that's already passed has nothing left to show for, unlike a
+    to-do (which stays open/overdue until explicitly done). Rows with no
+    event_time sort before ones with a time on the same day, matching how a
+    person would actually read a day's schedule."""
+    from_date = from_date or today_str()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE chat_id = ? AND event_date >= ? "
+            "ORDER BY event_date, (event_time IS NULL), event_time, id LIMIT ?",
+            (chat_id, from_date, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def edit_event_date(chat_id: int, event_id: int, new_event_date: str) -> dict | None:
+    """Reschedule -- the only field /rescheduleevent changes right now (see
+    events.py's module docstring for why rescheduling is slash-command-only).
+    A separate function rather than folding into a general edit_event,
+    mirroring meal/workout/vitals' edit_*_date, since it's the one field
+    that actually needs changing for this use case today."""
+    row = get_event(chat_id, event_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE events SET event_date = ? WHERE id = ? AND chat_id = ?", (new_event_date, event_id, chat_id)
+        )
+    return get_event(chat_id, event_id)
+
+
+def delete_event(chat_id: int, event_id: int) -> dict | None:
+    row = get_event(chat_id, event_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM events WHERE id = ? AND chat_id = ?", (event_id, chat_id))
+    return row
+
+
+def restore_deleted_event(chat_id: int, row: dict) -> dict | None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO events (chat_id, title, event_date, event_time, notes) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, row["title"], row["event_date"], row["event_time"], row["notes"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_event(chat_id, new_id)

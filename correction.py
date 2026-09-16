@@ -31,7 +31,16 @@ from telegram.ext import ContextTypes
 import config
 import db
 import fx
-from formatting import _meal_line, _memory_line, _money, _reminder_line, _task_line, _vitals_line, _workout_line
+from formatting import (
+    _event_line,
+    _meal_line,
+    _memory_line,
+    _money,
+    _reminder_line,
+    _task_line,
+    _vitals_line,
+    _workout_line,
+)
 from replies import _reply
 
 LAST_CORRECTION_KEY = "last_correction"
@@ -421,6 +430,18 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
         elif action == "mark_done":
             row = db.unmark_reminder_done_today(chat_id, snap["reminder_id"])
             await _reply(update, chat_id, f"Reverted -- back to not done today: {_reminder_line(row)}")
+        return True
+
+    if domain == "event":
+        # Also slash-command-only right now (/rescheduleevent, /removeevent
+        # -- see events.py's module docstring for why), so its own small
+        # branch, the same reasoning as "reminder"/"memory" above.
+        if action == "delete":
+            restored = db.restore_deleted_event(chat_id, snap["row"])
+            await _reply(update, chat_id, f"Restored: {_event_line(restored)}")
+        elif action == "reschedule":
+            row = db.edit_event_date(chat_id, snap["event_id"], snap["old_date"])
+            await _reply(update, chat_id, f"Reverted -- back to {row['event_date']}: {_event_line(row)}")
         return True
 
     if domain in _DOMAIN_OPS:

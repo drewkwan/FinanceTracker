@@ -1,9 +1,9 @@
 """
 Morning briefing: a proactive daily digest -- today's budget, today's/
-overdue to-dos, today's still-pending daily reminders, and a brief look
-back at yesterday -- pushed automatically once a day (see app.py's
-job_queue.run_daily wiring), plus /morning to preview the same content
-any time.
+overdue to-dos, today's still-pending daily reminders, what's coming up on
+the schedule this week, and a brief look back at yesterday -- pushed
+automatically once a day (see app.py's job_queue.run_daily wiring), plus
+/morning to preview the same content any time.
 
 Deliberately forward-looking, unlike rundown.py's 7-day retrospective: the
 point of a MORNING briefing is "what needs my attention today", not a
@@ -24,7 +24,14 @@ from telegram.ext import ContextTypes
 
 import db
 from access import _reject_if_not_allowed
-from formatting import _money, _reminder_line, _task_line
+from formatting import _event_line, _money, _reminder_line, _task_line
+
+# How many days ahead "Coming up" looks -- a focused near-term window, the
+# same reasoning as due_today_or_overdue only surfacing today/overdue tasks:
+# a morning briefing is about what needs attention soon, not a full schedule
+# dump (that's /events, on request). A week matches the workout-planning use
+# case this was built for (a week's plan committed as flat dated events).
+EVENTS_LOOKAHEAD_DAYS = 7
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +59,13 @@ def _morning_briefing_payload(chat_id: int) -> dict:
         r for r in db.get_active_reminders(chat_id) if r["last_done_date"] != today_str
     ]
 
+    # Upcoming events within the lookahead window only -- see
+    # EVENTS_LOOKAHEAD_DAYS' comment for why this isn't the full /events list.
+    lookahead_end = (date.fromisoformat(today_str) + timedelta(days=EVENTS_LOOKAHEAD_DAYS)).isoformat()
+    events_upcoming = [
+        e for e in db.get_upcoming_events(chat_id, from_date=today_str) if e["event_date"] <= lookahead_end
+    ]
+
     y_meals = db.get_meals_in_range(chat_id, yesterday_str, today_str)
     y_workouts = db.get_workouts_in_range(chat_id, yesterday_str, today_str)
     y_vitals = db.get_vitals_in_range(chat_id, yesterday_str, today_str)
@@ -61,6 +75,7 @@ def _morning_briefing_payload(chat_id: int) -> dict:
         "status": status,
         "due_today_or_overdue": due_today_or_overdue,
         "reminders_pending": reminders_pending,
+        "events_upcoming": events_upcoming,
         "yesterday": {
             "calories": sum(m["calories_estimate"] or 0 for m in y_meals) if y_meals else None,
             "water_ml": sum(m["water_ml"] or 0 for m in y_meals) if y_meals else None,
@@ -98,6 +113,13 @@ def _morning_briefing_text(payload: dict) -> str:
         lines.append("Daily reminders still to do today:")
         for r in reminders_pending:
             lines.append(_reminder_line(r))
+
+    events_upcoming = payload["events_upcoming"]
+    if events_upcoming:
+        lines.append("")
+        lines.append("Coming up:")
+        for e in events_upcoming:
+            lines.append(_event_line(e))
 
     y = payload["yesterday"]
     if y["calories"] or y["workout_activities"] or y["vitals_checkins"]:
