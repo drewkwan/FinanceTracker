@@ -122,6 +122,30 @@ def test_natural_language_log_vitals(monkeypatch):
     assert db.get_recent_vitals(CHAT)[0]["weight_kg"] == 76.6
 
 
+def test_natural_language_log_vitals_backdates_with_logged_days_ago(monkeypatch):
+    """Same fix as the meal/workout/expense cases: 'I forgot to log it, but
+    last night I weighed 76.6' used to always land on today -- see ai.py's
+    logged_days_ago rule."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None,
+                            recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {"intent": "log_vitals", "weight_kg": 76.6, "sleep_hours": None,
+                "knee_pain": None, "vitals_notes": None, "logged_days_ago": 1,
+                "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="forgot to log it, but last night I weighed 76.6")
+    _run(bot.handle_text(update, FakeContext()))
+
+    expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    logged = db.get_recent_vitals(CHAT)[0]
+    assert logged["vitals_date"] == expected_date
+    assert logged["vitals_date"] != db.today_str()
+    assert expected_date in update.message.replies[-1]  # _vitals_line always shows the date
+
+
 def test_logvitals_command_uses_extract_vitals(monkeypatch):
     db.get_or_create_user(CHAT)
     monkeypatch.setattr(bot.ai, "extract_vitals", lambda desc: {

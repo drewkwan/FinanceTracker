@@ -118,13 +118,33 @@ natural-language pattern.
   the same day is flagged as a likely duplicate — Morrow asks whether it's
   really a separate workout or the same one shown again, rather than
   logging it twice automatically.
-- **A photo's caption naming a specific past day backdates the log
-  immediately, at log time.** "These were my stats for 15 September" used
-  to get logged as today anyway, needing a manual `/undo` plus a date
-  correction afterwards. Claude now extracts how many days ago the caption
-  implies (never an actual date — the bot converts that day-count into a
-  real date deterministically, the same discipline used everywhere else a
-  date is involved) and logs the meal or workout directly onto that day.
+- **Several photos sent together in one message are read together, not one at a
+  time.** Telegram delivers a multi-photo message ("album") as a separate
+  update per photo, usually with the caption attached to only one of them -- a
+  real reported bug: two screenshots of the same day's fitness data (e.g. an
+  activity-rings detail screen plus a second screen restating part of the same
+  totals) got analyzed independently, with no way for either call to know about
+  the other, and landed as two separate workouts -- one of them even on the
+  wrong date, since it had no caption of its own to backdate from. Morrow now
+  buffers every photo that shares the same album briefly (waiting for a short
+  pause after the last one before assuming the album is complete), then hands
+  the whole set to Claude in one call so it can recognize "these are the same
+  underlying day" instead of double-counting. A photo sent on its own is
+  completely unaffected.
+- **A caption (or, for a typed/natural-language message, the message itself)
+  naming a specific past day backdates the log immediately, at log time.**
+  "These were my stats for 15 September" or "last night I also had a cup of
+  tea" used to get logged as today anyway, needing a manual `/undo` plus a date
+  correction afterwards -- this applied to a caption's own day reference, and,
+  until now, wasn't even possible for a plain natural-language log (an expense,
+  meal, workout, or vitals check-in) with no photo involved at all. Claude now
+  extracts how many days ago is meant (never an actual date -- the bot converts
+  that day-count into a real date deterministically, the same discipline used
+  everywhere else a date is involved) and logs directly onto that day, for any
+  of the four loggable domains. A message naming more than one day at once
+  (rare, but "yesterday I had a mango, and just now a coffee") logs each item
+  onto its own day and shows a running total for each day actually touched, not
+  just one.
 - **Vitals** (`/logvitals` or natural language, e.g. "weight 76.6, slept 5.5
   hours, knee 2/10") log whatever you mention — weight, sleep hours, knee
   pain (0-10), and free-text notes — leaving anything you didn't mention

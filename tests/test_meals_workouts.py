@@ -13,6 +13,7 @@ import datetime as dt
 import ai
 import bot
 import db
+import nutrition
 from conftest import CHAT
 from test_ai import _FakeClient, _mock_client  # reuse the existing fake client
 
@@ -524,6 +525,90 @@ def test_natural_language_log_workout(monkeypatch):
     assert db.get_recent_workouts(CHAT)[0]["activity"] == "tennis"
 
 
+def test_natural_language_log_workout_backdates_with_logged_days_ago(monkeypatch):
+    """Regression test for a real reported bug: 'last night I also went for
+    a run' (or any natural-language log with no photo involved) always
+    landed on today regardless of what the message said -- there was no
+    field carrying a day cue at all for text-based logging (unlike photo
+    captions, which already had logged_days_ago). The user had to notice
+    and fix it with a manual correction afterwards."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {"intent": "log_workout", "activity": "run", "duration_min": 30,
+                "distance_km": 5.0, "workout_notes": None, "logged_days_ago": 1,
+                "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="last night I went for a 5k run")
+    _run(bot.handle_text(update, FakeContext()))
+
+    expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    logged = db.get_recent_workouts(CHAT)[0]
+    assert logged["workout_date"] == expected_date
+    assert logged["workout_date"] != db.today_str()
+
+
+def test_natural_language_log_meal_single_item_backdates_with_logged_days_ago(monkeypatch):
+    """Same fix as the workout case above, for the exact interaction
+    reported: 'last night I also had a cup of decaf tea with milk and
+    500ml water to end' (sent well after midnight) got logged onto today."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return _log_meal_response(meals=[
+            {"meal_type": None, "items": ["cup of decaf tea with milk"], "calories_low": 20, "calories_high": 50,
+             "calories_estimate": 35, "water_ml": 500, "logged_days_ago": 1},
+        ])
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="last night I also had a cup of decaf tea with milk and 500ml water to end")
+    _run(bot.handle_text(update, FakeContext()))
+
+    expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    logged = db.get_recent_meals(CHAT)[0]
+    assert logged["meal_date"] == expected_date
+    assert logged["meal_date"] != db.today_str()
+    reply = update.message.replies[-1]
+    assert expected_date in reply  # the running-total line must be labelled for that day, not "today"
+
+
+def test_natural_language_log_meal_mixed_days_in_one_message_gets_per_day_totals(monkeypatch):
+    """A message can legitimately describe more than one day's meals at once
+    (e.g. catching up on yesterday AND mentioning something just eaten) --
+    each item's own logged_days_ago must land on its own day, and since
+    they're not all the same day, each line is date-tagged and BOTH days'
+    totals are shown rather than one misleading "today" total."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return _log_meal_response(meals=[
+            {"meal_type": "Dinner", "items": ["mango"], "calories_low": 90, "calories_high": 120,
+             "calories_estimate": 105, "water_ml": None, "logged_days_ago": 1},
+            {"meal_type": "Snack", "items": ["coffee"], "calories_low": 5, "calories_high": 15,
+             "calories_estimate": 10, "water_ml": None, "logged_days_ago": 0},
+        ])
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="yesterday I had a mango, and just now a coffee")
+    _run(bot.handle_text(update, FakeContext()))
+
+    yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    today = db.today_str()
+    dates_logged = {m["meal_date"] for m in db.get_recent_meals(CHAT)}
+    assert dates_logged == {yesterday, today}
+    reply = update.message.replies[-1]
+    # Mixed days in one message -> every line is date-tagged (not just the
+    # backdated one), since "today" alone would no longer be the unstated
+    # default once a message spans more than one day.
+    assert reply.split("\n")[1].endswith(f"({yesterday})") and "mango" in reply.split("\n")[1]
+    assert reply.split("\n")[2].endswith(f"({today})") and "coffee" in reply.split("\n")[2]
+    assert yesterday in reply and today in reply  # both days' totals shown, not just one
+
+
 def test_correction_can_target_a_meal_by_domain(monkeypatch):
     """Cross-domain version of the existing expense date-correction test:
     a meal can be deleted by natural language too, dispatched via target_domain."""
@@ -805,3 +890,115 @@ def test_photo_workout_with_caption_date_logs_directly_onto_that_day(monkeypatch
     expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
     logged = db.get_recent_workouts(CHAT)[0]
     assert logged["workout_date"] == expected_date
+
+
+# ---------- nutrition.py: photo albums (several photos sent in one message) ----------
+
+def test_album_of_two_photos_logs_only_one_workout_not_two(monkeypatch):
+    """Regression test for a real reported bug: two screenshots of the same
+    day's fitness-app activity, sent together in one Telegram message, got
+    logged as TWO separate workouts (one of them landing on the wrong date,
+    since Telegram only attaches the caption to one of the two photos) --
+    silently doubling that day's calories-burned total. Both photos must
+    now be buffered and handed to ai.extract_from_photos in ONE call,
+    producing exactly one logged workout."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(nutrition, "ALBUM_DEBOUNCE_SECONDS", 0.05)
+    calls = {"extract_from_photo": 0, "extract_from_photos": None}
+
+    def fake_extract_from_photo(image_bytes, caption=None):
+        calls["extract_from_photo"] += 1
+        raise AssertionError("the single-image path must not be used for an album")
+
+    def fake_extract_from_photos(images, caption=None):
+        calls["extract_from_photos"] = {"images": list(images), "caption": caption}
+        return {"kind": "workout", "activity": "daily activity", "duration_min": None,
+                "distance_km": 9.3, "calories_burned": 2732, "notes": None, "logged_days_ago": 1}
+
+    monkeypatch.setattr(bot.ai, "extract_from_photo", fake_extract_from_photo)
+    monkeypatch.setattr(bot.ai, "extract_from_photos", fake_extract_from_photos)
+
+    context = FakeContext()
+    update1 = FakeUpdate(CHAT, caption="Here were my stats from yesterday", photo=[_FakePhotoSize()])
+    update1.message.media_group_id = "album-1"
+    update1.message.photo = [_FakePhotoSize()]
+    update2 = FakeUpdate(CHAT, photo=[_FakePhotoSize()])  # part two -- no caption of its own, as Telegram sends it
+    update2.message.media_group_id = "album-1"
+
+    async def _simulate_album():
+        await bot.handle_photo(update1, context)
+        await bot.handle_photo(update2, context)
+        # Both calls above scheduled/cancelled tasks on THIS running loop -- await
+        # whichever one is still pending to drive the debounced processing to
+        # completion, the same way production just lets it fire on its own.
+        pending = nutrition._PENDING_ALBUMS["album-1"]["task"]
+        await pending
+
+    _run(_simulate_album())
+
+    assert calls["extract_from_photo"] == 0
+    assert calls["extract_from_photos"]["caption"] == "Here were my stats from yesterday"
+    assert len(calls["extract_from_photos"]["images"]) == 2
+    assert "album-1" not in nutrition._PENDING_ALBUMS, "the buffer must be cleaned up once processed"
+
+    workouts = db.get_recent_workouts(CHAT)
+    assert len(workouts) == 1, f"expected exactly one logged workout, got {len(workouts)}"
+    assert workouts[0]["calories_burned"] == 2732
+
+
+def test_album_caption_can_arrive_on_a_later_photo_not_the_first(monkeypatch):
+    """Telegram doesn't guarantee the caption lands on the first photo
+    delivered -- whichever photo in the album actually carries it must
+    still be used."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(nutrition, "ALBUM_DEBOUNCE_SECONDS", 0.05)
+    captured = {}
+
+    def fake_extract_from_photos(images, caption=None):
+        captured["caption"] = caption
+        return {"kind": "meal", "meal_type": "Lunch", "items": ["curry gyu don"],
+                "calories_low": 550, "calories_high": 750, "calories_estimate": 650, "water_ml": None}
+
+    monkeypatch.setattr(bot.ai, "extract_from_photos", fake_extract_from_photos)
+
+    context = FakeContext()
+    update1 = FakeUpdate(CHAT, photo=[_FakePhotoSize()])  # no caption on the first photo
+    update1.message.media_group_id = "album-2"
+    update2 = FakeUpdate(CHAT, caption="lunch was a curry gyu don", photo=[_FakePhotoSize()])
+    update2.message.media_group_id = "album-2"
+
+    async def _simulate_album():
+        await bot.handle_photo(update1, context)
+        await bot.handle_photo(update2, context)
+        await nutrition._PENDING_ALBUMS["album-2"]["task"]
+
+    _run(_simulate_album())
+    assert captured["caption"] == "lunch was a curry gyu don"
+
+
+def test_second_photo_in_album_supersedes_the_first_pending_task(monkeypatch):
+    """The first photo's debounce task must be cancelled (not left to also
+    fire independently) once a second photo in the same album arrives --
+    otherwise the album would still be processed twice."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(nutrition, "ALBUM_DEBOUNCE_SECONDS", 0.05)
+    monkeypatch.setattr(bot.ai, "extract_from_photos", lambda images, caption=None: {
+        "kind": "meal", "meal_type": "Snack", "items": ["mango"],
+        "calories_low": 90, "calories_high": 120, "calories_estimate": 105, "water_ml": None,
+    })
+
+    context = FakeContext()
+    update1 = FakeUpdate(CHAT, photo=[_FakePhotoSize()])
+    update1.message.media_group_id = "album-3"
+    update2 = FakeUpdate(CHAT, photo=[_FakePhotoSize()])
+    update2.message.media_group_id = "album-3"
+
+    async def _simulate_album():
+        await bot.handle_photo(update1, context)
+        first_task = nutrition._PENDING_ALBUMS["album-3"]["task"]
+        await bot.handle_photo(update2, context)
+        assert first_task.cancelled() or first_task.cancelling(), "the first photo's task must be cancelled"
+        await nutrition._PENDING_ALBUMS["album-3"]["task"]
+
+    _run(_simulate_album())
+    assert len(db.get_recent_meals(CHAT)) == 1

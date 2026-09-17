@@ -22,7 +22,7 @@ from finance import _balance_text, _recent_text
 from fitness import _force_log_workout_and_reply
 from formatting import _money, _status_text, _workout_line
 from memory import _memory_for_ai, _memory_text
-from nutrition import _log_meals_and_reply
+from nutrition import _log_meals_and_reply, _target_date_from_days_ago
 from events import _add_events_and_reply, _events_text
 from reminders import _add_reminder_and_reply, _reminders_text
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
@@ -222,15 +222,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "log_workout":
         context.chat_data.pop(PENDING_KEY, None)
+        # See ai.py's logged_days_ago rule: "last night I also went for a run"
+        # backdates the same way a photo's caption already could -- without
+        # this it always landed on today, no matter what the message said.
+        workout_date = _target_date_from_days_ago(parsed.get("logged_days_ago"))
         workout_id = db.add_workout(chat_id, parsed.get("activity"), parsed.get("duration_min"),
-                                     parsed.get("distance_km"), parsed.get("workout_notes"))
+                                     parsed.get("distance_km"), parsed.get("workout_notes"),
+                                     workout_date=workout_date)
         row = db.get_workout(chat_id, workout_id)
         await _reply(update, chat_id, f"Logged: {_workout_line(row)}")
         return
 
     if intent == "log_vitals":
         context.chat_data.pop(PENDING_KEY, None)
-        await _log_vitals_and_reply(update, chat_id, parsed)
+        vitals_date = _target_date_from_days_ago(parsed.get("logged_days_ago"))
+        await _log_vitals_and_reply(update, chat_id, parsed, vitals_date=vitals_date)
         return
 
     if intent == "log_task":
@@ -325,21 +331,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logged_lines = []
     any_personal = False
+    any_backdated = False
     for item in items:
         amount = float(item["amount"])
         currency = fx.normalize_currency(item.get("currency"))
         description = item.get("description") or "expense"
         category = item.get("category") or ai.categorize(description)
         is_claimable = bool(item.get("is_claimable"))
-        db.add_expense(chat_id, amount, currency, description, category, is_claimable=is_claimable)
+        # See ai.py's logged_days_ago rule -- "yesterday I paid 12 for lunch"
+        # used to always land on today regardless of what the message said.
+        expense_date = _target_date_from_days_ago(item.get("logged_days_ago"))
+        db.add_expense(chat_id, amount, currency, description, category, is_claimable=is_claimable,
+                       expense_date=expense_date)
         tag = " [claimable]" if is_claimable else ""
-        logged_lines.append(f"{_money(amount, currency)} -- {description} [{category}]{tag}")
+        date_tag = f" ({expense_date})" if expense_date else ""
+        logged_lines.append(f"{_money(amount, currency)} -- {description} [{category}]{tag}{date_tag}")
         any_personal = any_personal or not is_claimable
+        any_backdated = any_backdated or bool(expense_date)
 
     status = db.get_status(chat_id)
     header = "Logged:" if len(logged_lines) == 1 else f"Logged {len(logged_lines)} expenses:"
     body = "\n".join(logged_lines) if len(logged_lines) == 1 else "\n".join(f"- {ln}" for ln in logged_lines)
-    await _reply(update, chat_id, f"{header}\n{body}\n\n{_status_text(status)}")
+    # A backdated expense doesn't change today's own balance/spent figures --
+    # showing _status_text right under it would misleadingly read as if it
+    # did, so it's skipped whenever at least one item in this message landed
+    # on an earlier day (rare enough that dropping it for the whole message,
+    # rather than only the backdated item, isn't worth the extra complexity).
+    status_line = f"\n\n{_status_text(status)}" if not any_backdated else ""
+    await _reply(update, chat_id, f"{header}\n{body}{status_line}")
     if any_personal:
         await _send_alert_if_needed(update, chat_id)
 

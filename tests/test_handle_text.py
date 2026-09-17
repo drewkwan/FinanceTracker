@@ -146,6 +146,42 @@ def test_multiple_expenses_in_one_message_are_all_logged(monkeypatch):
     assert db.get_status(CHAT)["spent_today"] == 10.0
 
 
+def test_natural_language_log_expense_backdates_with_logged_days_ago(monkeypatch):
+    """Same fix as the meal/workout/vitals cases (see ai.py's logged_days_ago
+    rule): 'yesterday I paid 12 for lunch' must land on yesterday, not
+    today. The status/balance line is skipped since a backdated entry
+    doesn't change today's own spent-today figure -- showing it right
+    underneath would misleadingly read as if it did."""
+    db.get_or_create_user(CHAT)
+    db.set_daily_target(CHAT, 100)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {
+            "intent": "log_expense",
+            "expenses": [{"amount": 12, "currency": None, "description": "lunch", "category": "Food",
+                           "is_claimable": False, "logged_days_ago": 1}],
+            "target_expense_id": None, "correction_action": None, "days_ago": None,
+            "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, "yesterday I paid 12 for lunch")
+    _run(bot.handle_text(update, context))
+
+    import datetime as dt
+    expected_date = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    logged = db.get_recent_expenses(CHAT)[0]
+    assert logged["expense_date"] == expected_date
+    assert logged["expense_date"] != db.today_str()
+    reply = update.message.replies[-1]
+    assert expected_date in reply
+    assert "Today's target" not in reply  # _status_text skipped for a backdated log
+    assert db.get_status(CHAT)["spent_today"] == 0.0  # today's own figure must be untouched
+
+
 def test_single_expense_reply_wording_unchanged(monkeypatch):
     """Guards against the multi-expense change regressing the common case --
     a single logged expense should still read 'Logged:', not 'Logged 1

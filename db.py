@@ -375,7 +375,13 @@ def maybe_alert(chat_id: int) -> bool:
 
 
 def add_expense(chat_id: int, amount: float, currency: str, description: str, category: str,
-                 is_claimable: bool = False) -> int:
+                 is_claimable: bool = False, expense_date: str | None = None) -> int:
+    """expense_date defaults to today -- pass it explicitly only when the
+    caller already computed a real backdated date deterministically (see
+    add_meal's docstring for the same reasoning; never a date guessed by
+    the AI itself). Rollover is always ensured for TODAY regardless -- an
+    expense logged onto an earlier day doesn't change where today's own
+    balance boundary sits."""
     ensure_rollover(chat_id)
     get_or_create_user(chat_id)
     currency = (currency or config.BASE_CURRENCY).upper()
@@ -384,7 +390,8 @@ def add_expense(chat_id: int, amount: float, currency: str, description: str, ca
         conn.execute(
             "INSERT INTO expenses (chat_id, amount, currency, amount_base, description, category, "
             "is_claimable, expense_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, amount, currency, amount_base, description, category, int(is_claimable), today_str()),
+            (chat_id, amount, currency, amount_base, description, category, int(is_claimable),
+             expense_date or today_str()),
         )
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
@@ -924,13 +931,18 @@ def get_daily_workout_totals(chat_id: int, day_str: str) -> dict:
 # reports only some of weight/sleep/knee, plus a free-text note.
 
 def add_vitals(chat_id: int, weight_kg: float | None = None, sleep_hours: float | None = None,
-                knee_pain: float | None = None, notes: str | None = None) -> int:
+                knee_pain: float | None = None, notes: str | None = None,
+                vitals_date: str | None = None) -> int:
+    """vitals_date defaults to today -- pass it explicitly only when the
+    caller already computed a real backdated date deterministically (see
+    add_meal's docstring for the same reasoning; never a date guessed by
+    the AI itself)."""
     get_or_create_user(chat_id)
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO vitals (chat_id, weight_kg, sleep_hours, knee_pain, notes, vitals_date) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, weight_kg, sleep_hours, knee_pain, notes, today_str()),
+            (chat_id, weight_kg, sleep_hours, knee_pain, notes, vitals_date or today_str()),
         )
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 

@@ -133,19 +133,22 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
     "description": string, "category": one of the category list or null if unclear,
-    "is_claimable": true/false/null}},
+    "is_claimable": true/false/null, "logged_days_ago": integer or null (see logged_days_ago rule below --
+    per item, since a single message can mix "yesterday I paid X, and today Y")}},
 
   "meals": [list of one or more objects, log_meal only -- ALWAYS a list, even for a single meal]
     each shaped: {{"meal_type": one of the meal type list, or null, "items": [list of individual food/drink
     items as short strings], "calories_low": number or null (a plausible low-end estimate, not false
     precision), "calories_high": number or null (plausible high end), "calories_estimate": number or null (the
     central estimate, roughly the midpoint), "water_ml": number or null (ONLY for plain water, never other
-    drinks; null if not plain water)}},
+    drinks; null if not plain water), "logged_days_ago": integer or null (see logged_days_ago rule below --
+    per item, since a single message can describe more than one day's meals)}},
 
   "activity": string or null (log_workout only -- e.g. "tennis", "IPPT training", "gym", "run"),
   "duration_min": number or null (log_workout only),
   "distance_km": number or null (log_workout only),
   "workout_notes": string or null (log_workout only -- any detail worth keeping: sets, splits, how it felt),
+  "logged_days_ago": integer or null (log_workout + log_vitals only -- see logged_days_ago rule below),
 
   "weight_kg": number or null (log_vitals only),
   "sleep_hours": number or null (log_vitals only),
@@ -458,6 +461,17 @@ Deciding the intent:
   amount, a log_meal that's too vague to estimate at all, a correction with an unclear target/domain, or a
   "forget" with an unclear target label. Ask ONE short, specific question.
 
+logged_days_ago rule (log_expense, log_meal, log_workout, log_vitals -- whenever something is being logged
+NOW for something that happened on an EARLIER day, not corrected after the fact): 0 = today/tonight (same as
+leaving it null -- today is the default), 1 = yesterday/last night, 2 = two days ago, etc., up to 14. Set it
+whenever the message itself names or clearly implies a day other than today -- "last night I also had...",
+"yesterday's lunch was...", "this morning I did...", "on Monday I ran...". A real bug this fixes: "last night I
+also had a cup of tea" got logged onto today (the message's own send time) instead of the previous day, purely
+because there was no field to carry that -- the user had to notice and correct it by hand afterwards. Extract
+WHICH day as a plain count of days back, exactly like correction's own "days_ago" below; never compute or
+output an actual calendar date yourself, that's done in code. Leave it null (not 0) when the message doesn't
+say or imply anything about timing -- most messages don't, and today is already the right default without it.
+
 Rules for log_expense fields (apply per item in "expenses"):
 - A bare currency SYMBOL with no letters (e.g. "$", "£") is ambiguous on its own -- default it to the base
   currency ({config.BASE_CURRENCY}) rather than assuming USD, unless the message also spells out an actual
@@ -765,19 +779,76 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
     logged as a workout. Never raises, and falls back to {"kind": "unclear"}
     rather than guessing wildly if the vision call fails or the model's reply
     doesn't parse into one of the three known shapes. Telegram's "photo"
-    message type always transcodes to JPEG, so media_type is fixed."""
+    message type always transcodes to JPEG, so media_type is fixed.
+
+    Only ever called with ONE image -- see extract_from_photos for more than
+    one sent together in a single message (a Telegram "album")."""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    user_content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+        {"type": "text", "text": caption or "What does this photo show?"},
+    ]
+    return _classify_photo_content(user_content, "extract_from_photo")
+
+
+# Telegram delivers an "album" (several photos sent together in one message)
+# as one Update per photo, each carrying the same media_group_id but usually
+# only ONE of them carrying the caption -- see nutrition.handle_photo's
+# album-buffering for how those get collected into a single call here. This
+# note is appended only for that multi-image call, not extract_from_photo's
+# single-image one, since it doesn't apply there.
+MULTI_PHOTO_NOTE = """
+
+IMPORTANT: more than one photo was sent together in a single message, so treat them as describing ONE \
+underlying meal or workout, not several -- almost always several screenshots of the SAME fitness app/health \
+screen (e.g. one screen's activity-rings detail plus another screen that separately restates part of the \
+same day's totals, like just the Move ring's own contribution to a total shown in full elsewhere), or several \
+angles/parts of the SAME plate of food, not two unrelated days or two unrelated meals. A real bug this fixes: \
+two screenshots of the same day's activity data, analyzed one at a time, got logged as two separate workouts \
+-- each read the numbers actually in front of it correctly, but couldn't tell it was looking at data another \
+photo in the same message already covered, so the same calories-burned total effectively got counted twice.
+
+Read every image together and synthesize ONE combined entry from whichever numbers are the most complete and \
+authoritative across all of them -- e.g. if one image shows a day's TOTAL calories burned and another shows a \
+narrower sub-total that's already part of that total, use the total; never add the two together or report \
+both as if they were separate. Only return "kind": "unclear" if the photos genuinely don't add up to one \
+coherent meal or workout at all. In the rare case they truly show two unrelated days or two unrelated meals, \
+extract whichever one the caption is actually about (or the more complete one if the caption doesn't say) --
+only one combined entry can be logged from this call."""
+
+
+def extract_from_photos(images: list[bytes], caption: str | None = None) -> dict:
+    """Same classify-and-extract as extract_from_photo, for when more than
+    one photo arrives in a single Telegram message (an "album" -- see
+    nutrition.handle_photo's module docstring for the buffering that
+    collects them before this is ever called). ALL images are sent to
+    Claude in ONE multimodal call so it can reason about them together --
+    see MULTI_PHOTO_NOTE for exactly why that matters and the real bug it
+    fixes; a single-image album (by far the common case) never reaches this
+    function at all, extract_from_photo handles it unchanged."""
+    user_content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                      "data": base64.b64encode(img).decode("ascii")}}
+        for img in images
+    ]
+    user_content.append({
+        "type": "text",
+        "text": f"({len(images)} photos sent together in one message.) " + (caption or "What do these show?"),
+    })
+    return _classify_photo_content(user_content, "extract_from_photos", extra_system_note=MULTI_PHOTO_NOTE)
+
+
+def _classify_photo_content(user_content: list, caller_name: str, extra_system_note: str = "") -> dict:
+    """Shared Claude-call/parse/fallback plumbing for extract_from_photo and
+    extract_from_photos -- one image or several, the request/response shape
+    and failure handling are identical; only the content blocks differ."""
     fallback = {"kind": "unclear"}
     try:
         client = _get_client()
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-        user_content = [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-            {"type": "text", "text": caption or "What does this photo show?"},
-        ]
         resp = client.messages.create(
             model=config.CLAUDE_MODEL,
             max_tokens=300,
-            system=PHOTO_CLASSIFY_SYSTEM_PROMPT,
+            system=PHOTO_CLASSIFY_SYSTEM_PROMPT + extra_system_note,
             messages=[{"role": "user", "content": user_content}],
         )
         raw = resp.content[0].text.strip()
@@ -786,7 +857,7 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
             return fallback
         return data
     except Exception:
-        logger.exception("extract_from_photo: Claude vision call failed, falling back to 'unclear'")
+        logger.exception("%s: Claude vision call failed, falling back to 'unclear'", caller_name)
         return fallback
 
 
@@ -1049,6 +1120,7 @@ def _clarify_fallback(message: str) -> dict:
         "sleep_hours": None,
         "knee_pain": None,
         "vitals_notes": None,
+        "logged_days_ago": None,
         "tasks": None,
         "reminder_description": None,
         "events": None,

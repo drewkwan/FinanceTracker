@@ -13,9 +13,16 @@ from formatting import _vitals_line
 from replies import _reply
 
 
-async def _log_vitals_and_reply(update: Update, chat_id: int, data: dict):
+async def _log_vitals_and_reply(update: Update, chat_id: int, data: dict, vitals_date: str | None = None):
+    """vitals_date lets the natural-language log_vitals intent backdate a
+    check-in the same way meals/workouts/expenses now can -- see ai.py's
+    logged_days_ago rule and handlers.py's use of
+    nutrition._target_date_from_days_ago for how it's computed. _vitals_line
+    already always shows the date, so a backdated entry is visible without
+    any extra tagging here."""
     vitals_id = db.add_vitals(chat_id, data.get("weight_kg"), data.get("sleep_hours"),
-                               data.get("knee_pain"), data.get("notes") or data.get("vitals_notes"))
+                               data.get("knee_pain"), data.get("notes") or data.get("vitals_notes"),
+                               vitals_date=vitals_date)
     row = db.get_vitals(chat_id, vitals_id)
     await _reply(update, chat_id, f"Logged: {_vitals_line(row)}")
 
