@@ -330,12 +330,39 @@ startup log warning), but `/morning` still works on demand regardless.
   a true recurring rule, so this covers it without guessing at a recurrence
   design ahead of a real driving case.
 
+## How Telegram formatting works
+
+Every outgoing message is sent with Telegram's HTML `parse_mode` (not
+MarkdownV2 -- MarkdownV2 requires escaping punctuation like `-`, `.`, `!`,
+`#` that shows up constantly in this bot's own text, like dates and
+calorie ranges, so almost every existing string would have broken).
+This is wired up in exactly one place: `app.py`'s `_FormattingBot`, a thin
+`Bot` subclass that every `reply_text`/`send_message` call in the codebase
+already routes through, which runs the outgoing text through
+`tg_html.to_telegram_html` before it reaches Telegram. No domain module
+needs to remember to escape anything or set a parse mode itself.
+
+`to_telegram_html` first HTML-escapes the text (so a stray `&`, `<`, or
+`>` in a logged description or note can never break Telegram's parser or
+be mistaken for a tag), then promotes a small, deliberate set of
+lightweight-markdown conventions into the matching Telegram tags:
+`**bold**`, `` `inline code` ``, and a ` ```fenced block``` ` for
+monospace column alignment. Claude's own freeform narrative prompts
+(`casual_reply`, `/summary`, `/rundown`) are told to use these -- plus
+plain unicode arrows (↑/↓/→) for a trend direction -- sparingly, and only
+when a genuine comparison (e.g. "how did this week's workouts compare to
+last week") would otherwise lose its shape as plain prose. Telegram has
+no real table support in any client, so a literal markdown table is never
+used -- it would just render as a wall of pipes and dashes; a short fenced
+block is the substitute when something truly needs aligned columns.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `bot.py` | Thin facade re-exporting every domain module's names (see its own docstring) |
 | `app.py` | Entrypoint: builds the bot, registers every handler, the periodic rollover job |
+| `tg_html.py` | Escapes + promotes lightweight markdown to Telegram HTML for every outgoing message (see "How Telegram formatting works") |
 | `morning.py` | The daily morning briefing (`/morning` + the automatic proactive push) |
 | `reminders.py` | Daily recurring reminders (`/addreminder`, `/reminders`, `/donereminder`, `/removereminder`) |
 | `events.py` | Flat scheduled events/appointments (`/addevent`, `/events`, `/rescheduleevent`, `/removeevent`) |

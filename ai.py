@@ -431,8 +431,12 @@ Deciding the intent:
   something durable (e.g. "hi", "thanks", small talk, catching up, venting, asking for advice, or a specific
   question you can answer directly from conversation history or memory content, like "what's my gym plan
   again?"). Write a short, warm "casual_reply" as the person's companion, not a command menu -- 1-2 sentences
-  normally, longer only if the moment genuinely calls for it (e.g. they want to talk something through), no
-  markdown. Draw on conversation history and memory content naturally rather than re-asking for information you
+  normally, longer only if the moment genuinely calls for it (e.g. they want to talk something through).
+  Telegram renders **bold**, `backticks`, a fenced ``` block for monospace column alignment, and plain unicode
+  arrows (up/down/right) for a trend -- reach for these ONLY when the reply is genuinely a comparison (e.g.
+  "how did this week's workouts stack up against last week") and plain prose would actually lose the shape of
+  it; an ordinary casual_reply stays plain conversational sentences, not a decorated report. Draw on
+  conversation history and memory content naturally rather than re-asking for information you
   already have. If they ask about a capability the bot has (a summary, undoing something), point them at the
   real command instead of saying you can't help -- never deny something on the real command list above. If they
   ask for something the bot genuinely can't do (e.g. a specific past day's balance -- /balance only ever
@@ -888,6 +892,23 @@ def extract_event(description: str) -> dict:
         return fallback
 
 
+# Shared by every prompt below that writes a freeform narrative for Telegram (this one,
+# TRENDS_SYSTEM_PROMPT, and answer_with_rundown's own prompt -- casual_reply gets the same
+# convention in its own words above, since its tone is personal rather than analytical) --
+# one place so the convention can't drift between them. Telegram has no real table support in
+# any client, so a genuine comparison ("this week vs last week", a few categories side by side)
+# can't be a markdown table -- it would just render as a wall of pipes and dashes.
+TELEGRAM_FORMATTING_NOTE = (
+    "Formatting for Telegram: never write a markdown table (pipes/dashes) -- it renders as a wall of "
+    "punctuation, not a table. Instead use **bold** for a word or figure worth emphasizing, `backticks` to "
+    "call out one short value inline, and a fenced ``` block ONLY when a comparison genuinely needs "
+    "monospace column alignment (e.g. two or three rows of this-period-vs-last-period numbers) -- most "
+    "replies don't need one. Plain unicode arrows (↑ for an increase, ↓ for a decrease, → for roughly flat) "
+    "are welcome in place of writing \"increased\"/\"decreased\" every time. Use all of this sparingly -- it "
+    "should read like a person highlighting the one thing that matters, not a decorated report."
+)
+
+
 def answer_with_data(question: str, rows: list) -> str:
     """rows: list of {category, total, n} dicts. Returns a short natural-language summary."""
     client = _get_client()
@@ -897,8 +918,8 @@ def answer_with_data(question: str, rows: list) -> str:
         max_tokens=400,
         system=(
             "You are a personal finance assistant. You're given category spending totals as JSON "
-            "and a question from the user. Answer concisely in plain text (no markdown headers), "
-            "suitable for a Telegram message. A couple of short lines plus a one-line takeaway is ideal."
+            "and a question from the user. Answer concisely, suitable for a Telegram message -- a couple "
+            f"of short lines plus a one-line takeaway is ideal. {TELEGRAM_FORMATTING_NOTE}"
         ),
         messages=[{"role": "user", "content": f"Data: {data_str}\n\nQuestion: {question}"}],
     )
@@ -944,10 +965,12 @@ briefly and warmly -- don't invent a concern to fill space.
 Write 3-7 short plain-text lines: the total spend and how it compares to the prior period, the standout \
 worth naming (by the reasoning above -- category, ratio, and the actual transaction if that's the real \
 driver), at most one more secondary note (a day-of-week pattern only if genuinely notable, or budget \
-adherence), and a one-line closing take. No markdown headers or bullet symbols -- plain conversational \
-lines, like a person who actually looked at the numbers, not a template. Be matter-of-fact and specific \
-(name real amounts and multiples), not alarmist, not vague, and never moralizing beyond one plain \
-sentence when something really is worth a second look."""
+adherence), and a one-line closing take. Plain conversational lines by default, like a person who actually \
+looked at the numbers, not a template or bullet list. Be matter-of-fact and specific (name real amounts and \
+multiples), not alarmist, not vague, and never moralizing beyond one plain sentence when something really is \
+worth a second look.
+
+""" + TELEGRAM_FORMATTING_NOTE
 
 
 def answer_with_trends(period: str, payload: dict) -> str:
@@ -996,10 +1019,10 @@ def answer_with_rundown(payload: dict) -> str:
             "(nothing logged that domain this week) -- skip it silently rather than mentioning its "
             "absence or guessing at a number that isn't there. Write 3-6 short plain-text lines: lead "
             "with whichever domain has the most notable signal (a clear trend, a streak, a gap worth "
-            "naming), touch the others briefly, and end with one matter-of-fact takeaway. No markdown "
-            "headers or bullet symbols -- plain conversational lines, the way a companion would actually "
-            "talk, not a report. Matter-of-fact and useful, never alarmist or nagging, and never invent "
-            "a number that isn't in the data."
+            "naming), touch the others briefly, and end with one matter-of-fact takeaway. Plain "
+            "conversational lines by default, the way a companion would actually talk, not a report or "
+            "bullet list. Matter-of-fact and useful, never alarmist or nagging, and never invent "
+            f"a number that isn't in the data. {TELEGRAM_FORMATTING_NOTE}"
         ),
         messages=[{"role": "user", "content": data_str}],
     )

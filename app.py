@@ -13,9 +13,12 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before `import config`, which reads env vars at import time
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
+    Defaults,
+    ExtBot,
     MessageHandler,
     ContextTypes,
     filters,
@@ -23,6 +26,7 @@ from telegram.ext import (
 
 import config
 import db
+from tg_html import to_telegram_html
 from access import _reject_if_not_allowed
 from finance import (
     adjustbalance_cmd,
@@ -53,6 +57,28 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+class _FormattingBot(ExtBot):
+    """The one actual chokepoint for every outgoing message, however it was
+    sent -- update.message.reply_text(...) (used throughout every domain
+    module) and context.bot.send_message(...) (used by rollover_tick and
+    morning.py's proactive push) both end up calling THIS send_message
+    under the hood, so running tg_html.to_telegram_html here, once, is
+    equivalent to every call site remembering to do it itself, without
+    actually touching any of them. See tg_html's module docstring for why
+    this -- rather than each module escaping its own strings -- is the
+    right place: Defaults(parse_mode=HTML) below turns HTML parsing on for
+    every send, so from this point on EVERY outgoing text needs the same
+    escaping/promotion treatment, not just the ones some future edit
+    happens to remember."""
+
+    async def send_message(self, *args, **kwargs):
+        if "text" in kwargs:
+            kwargs["text"] = to_telegram_html(kwargs["text"])
+        elif len(args) >= 2:
+            args = (args[0], to_telegram_html(args[1]), *args[2:])
+        return await super().send_message(*args, **kwargs)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,7 +155,14 @@ def main():
 
     db.init_db()
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    # A custom bot instance (not .token(...)) so every send_message call --
+    # from any domain module, not just this file -- routes through
+    # _FormattingBot's override. Defaults(parse_mode=HTML) is what actually
+    # turns HTML parsing on for every send that doesn't explicitly pass its
+    # own parse_mode (none currently do); see _FormattingBot's docstring
+    # for why the two need to travel together.
+    bot = _FormattingBot(token=config.TELEGRAM_BOT_TOKEN, defaults=Defaults(parse_mode=ParseMode.HTML))
+    app = Application.builder().bot(bot).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
