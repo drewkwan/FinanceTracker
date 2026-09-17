@@ -170,7 +170,8 @@ def test_natural_language_add_reminder(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {
             "intent": "add_reminder", "reminder_description": "take hair pills",
             "clarification_question": None, "casual_reply": None,
@@ -187,7 +188,8 @@ def test_natural_language_add_reminder_without_a_description_asks_instead_of_gue
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {
             "intent": "add_reminder", "reminder_description": None,
             "clarification_question": None, "casual_reply": None,
@@ -205,7 +207,8 @@ def test_natural_language_show_reminders(monkeypatch):
     db.add_reminder(CHAT, "take hair pills")
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {
             "intent": "show_reminders",
             "clarification_question": None, "casual_reply": None,

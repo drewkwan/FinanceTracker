@@ -72,12 +72,25 @@ CORRECTION_ACTIONS = {
 # PARSE_SYSTEM_PROMPT correction rules).
 SIMPLE_DOMAIN_ACTIONS = {"edit_date", "delete"}
 TASK_DOMAIN_ACTIONS = {"mark_done", "edit_task", "delete"}
+# meal gets its own bucket, one step wider than workout/vitals' SIMPLE_DOMAIN_ACTIONS --
+# edit_meal (a flexible items/calories correction, mirroring edit_task) exists specifically
+# for a photo- or text-logged meal that came out wrong (an item that wasn't really eaten,
+# a portion size off) without forcing a delete-and-relog round trip. workout/vitals don't
+# get it yet -- no observed real-world need for it there so far, unlike meals (a photo
+# hallucinating an extra item that was never actually eaten is a real, repeatable failure
+# mode this domain is uniquely exposed to -- see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT).
+MEAL_DOMAIN_ACTIONS = {"edit_date", "edit_meal", "delete"}
+# event gets the narrowest bucket of all -- an event has no "done" state and no other
+# editable field via natural language yet (rescheduling stays command-only, see
+# events.py's module docstring), so "delete" is the only thing a correction can do to one.
+EVENT_DOMAIN_ACTIONS = {"delete"}
 
 _DOMAIN_OPS = {
     "meal": {"noun": "meal", "recent_cmd": "/recentmeals", "date_field": "meal_date",
-              "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
+              "actions": MEAL_DOMAIN_ACTIONS,
+              "actions_desc": "moving the date, correcting what you actually ate, or deleting one",
               "get": db.get_meal, "edit_date": db.edit_meal_date, "delete": db.delete_meal,
-              "restore": db.restore_deleted_meal, "line": _meal_line},
+              "restore": db.restore_deleted_meal, "line": _meal_line, "edit_meal": db.edit_meal},
     "workout": {"noun": "workout", "recent_cmd": "/recentworkouts", "date_field": "workout_date",
                  "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                  "get": db.get_workout, "edit_date": db.edit_workout_date, "delete": db.delete_workout,
@@ -92,6 +105,13 @@ _DOMAIN_OPS = {
               "get": db.get_task, "delete": db.delete_task, "restore": db.restore_deleted_task,
               "line": _task_line, "mark_done": db.mark_task_done, "unmark_done": db.unmark_task_done,
               "edit_task": db.edit_task},
+    "event": {"noun": "event", "recent_cmd": "/events",
+               "actions": EVENT_DOMAIN_ACTIONS,
+               "actions_desc": "only deleting one (an event has no \"done\" state -- \"X is done\" or \"that "
+                                "already happened\" both just mean remove it; reschedule with "
+                                "/rescheduleevent <id> <days from today>)",
+               "get": db.get_event, "delete": db.delete_event, "restore": db.restore_deleted_event,
+               "line": _event_line},
 }
 
 
@@ -108,11 +128,24 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
     action = parsed.get("correction_action")
     noun, recent_cmd = ops["noun"], ops["recent_cmd"]
 
-    if target_id not in recent_ids or action not in ops["actions"]:
+    # Two different failure modes, deliberately reported differently -- the
+    # id genuinely wasn't found/matched (the AI's domain/id guess was wrong,
+    # or the item has since been removed) vs. the id WAS found but this kind
+    # of edit isn't supported for this domain (a real, deliberate scope cut,
+    # not a mistake). Conflating them into one "not sure which X you mean"
+    # message was itself a real observed bug: it reads as if the item was
+    # never found at all, even when it was matched correctly and the only
+    # actual problem was the unsupported action.
+    if target_id not in recent_ids:
         await _reply(
             update, chat_id,
-            f"I'm not sure which {noun} you mean, or that kind of edit isn't supported yet for "
-            f"{noun}s -- {ops['actions_desc']} is. Run {recent_cmd} to see recent entries."
+            f"I'm not sure which {noun} you mean -- run {recent_cmd} to see recent entries."
+        )
+        return
+    if action not in ops["actions"]:
+        await _reply(
+            update, chat_id,
+            f"Found that {noun}, but that kind of edit isn't supported yet -- {ops['actions_desc']} is."
         )
         return
 
@@ -195,6 +228,56 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
         await _reply(update, chat_id, f"Updated -- {', '.join(bits)}. Reply 'undo' if that's wrong.")
         return
 
+    if action == "edit_meal":
+        # Corrects what was actually in an already-logged meal (an item a
+        # photo hallucinated in, a portion size off) without deleting and
+        # relogging from scratch -- see ai.py's edit_meal prompt rules. The
+        # model always sends the FULL corrected item list plus a fresh
+        # calorie re-estimate for it, the same "give me the whole picture,
+        # not a diff" shape as edit_task's title/due/notes.
+        new_items = parsed.get("new_meal_items")
+        new_type = parsed.get("new_meal_type")
+        new_low = parsed.get("new_meal_calories_low")
+        new_high = parsed.get("new_meal_calories_high")
+        new_estimate = parsed.get("new_meal_calories_estimate")
+        new_water_ml = parsed.get("new_meal_water_ml")
+
+        if new_items is None and new_type is None and new_water_ml is None:
+            await _reply(
+                update, chat_id,
+                f"What should I fix about that {noun} -- an item you didn't actually have, one you forgot to "
+                "add, or the portion size?"
+            )
+            return
+
+        edits = {}
+        if new_items is not None:
+            edits["new_items"] = new_items
+            # Calories are meant to always travel with a changed item list
+            # (see ai.py's rule) -- but never trust that blindly; only apply
+            # them if all three actually came back set, otherwise leave the
+            # old estimate in place rather than writing a broken partial one.
+            if new_low is not None and new_high is not None and new_estimate is not None:
+                edits["new_calories_low"] = new_low
+                edits["new_calories_high"] = new_high
+                edits["new_calories_estimate"] = new_estimate
+        if new_type is not None:
+            edits["new_meal_type"] = new_type
+        if new_water_ml is not None:
+            edits["new_water_ml"] = new_water_ml
+
+        old_meal_type, old_items = row["meal_type"], row["items"]
+        old_low, old_high, old_estimate = row["calories_low"], row["calories_high"], row["calories_estimate"]
+        old_water_ml = row["water_ml"]
+        updated = ops["edit_meal"](chat_id, target_id, **edits)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "edit_meal", "expense_id": target_id,
+            "old_meal_type": old_meal_type, "old_items": old_items, "old_calories_low": old_low,
+            "old_calories_high": old_high, "old_calories_estimate": old_estimate, "old_water_ml": old_water_ml,
+        }
+        await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
+        return
+
     if action == "mark_done":
         updated = ops["mark_done"](chat_id, target_id)
         context.chat_data[LAST_CORRECTION_KEY] = {
@@ -241,13 +324,13 @@ async def _handle_balance_adjustment(update: Update, context: ContextTypes.DEFAU
 async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict,
                               recent_ids: set, recent_meal_ids: set = frozenset(),
                               recent_workout_ids: set = frozenset(), recent_vitals_ids: set = frozenset(),
-                              recent_task_ids: set = frozenset()):
+                              recent_task_ids: set = frozenset(), recent_event_ids: set = frozenset()):
     """Applies a correction the AI identified against one of the chat's
-    recent expenses/meals/workouts/vitals/tasks. Every confirmation message
-    here is built from real values just read back from the database --
-    never from AI-generated text -- so the bot can never claim to have made
-    a change it didn't actually make (the exact failure mode that prompted
-    this feature)."""
+    recent expenses/meals/workouts/vitals/tasks/events. Every confirmation
+    message here is built from real values just read back from the
+    database -- never from AI-generated text -- so the bot can never claim
+    to have made a change it didn't actually make (the exact failure mode
+    that prompted this feature)."""
     chat_id = update.effective_chat.id
     target_id = parsed.get("target_expense_id")
     action = parsed.get("correction_action")
@@ -264,6 +347,9 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if domain == "task":
         await _handle_simple_domain_correction(update, context, parsed, "task", recent_task_ids)
+        return
+    if domain == "event":
+        await _handle_simple_domain_correction(update, context, parsed, "event", recent_event_ids)
         return
 
     if domain == "balance":
@@ -467,6 +553,15 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
             row = ops["edit_task"](chat_id, snap["expense_id"], new_title=snap["old_title"],
                                     new_due_at=snap["old_due_at"], new_notes=snap["old_notes"])
             await _reply(update, chat_id, f"Reverted -- back to \"{row['title']}\".")
+        elif action == "edit_meal":
+            # Same "pass every field back explicitly" discipline as edit_task
+            # above -- these are the real prior values, not "leave untouched".
+            row = ops["edit_meal"](
+                chat_id, snap["expense_id"], new_meal_type=snap["old_meal_type"], new_items=snap["old_items"],
+                new_calories_low=snap["old_calories_low"], new_calories_high=snap["old_calories_high"],
+                new_calories_estimate=snap["old_calories_estimate"], new_water_ml=snap["old_water_ml"],
+            )
+            await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
         return True
 
     if action == "delete":

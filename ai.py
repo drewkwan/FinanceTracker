@@ -112,6 +112,11 @@ You will also be given several JSON lists for context:
 the ONLY items you may reference for a correction -- never invent or guess an id that isn't in the matching list.
 - Recent open to-dos (most recent first, each with an "id", "title", "due_at"). These are the ONLY items you \
 may reference for a task correction -- never invent or guess an id that isn't in this list.
+- Upcoming scheduled events (soonest first, each with an "id", "event_title", "event_date"). These are the ONLY \
+items you may reference for an event correction -- never invent or guess an id that isn't in this list. Note \
+that task ids and event ids come from SEPARATE counters, so the SAME bare number can validly appear in both \
+lists at once -- if it does, use the rest of the message (an appointment/schedule framing vs a to-do framing, \
+or the actual title mentioned) to tell which list the user means; if it's genuinely unclear, use "clarification".
 - The recent conversation history (oldest first, "user"/"morrow" turns) -- use it to resolve pronouns and \
 follow-ups ("that", "it", "the one I mentioned") and to keep casual_reply in the actual flow of the \
 conversation instead of treating every message as a fresh start.
@@ -157,12 +162,12 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     date, e.g. "by 5pm friday" -> "17:00"), "notes": string or null (any extra detail worth keeping beyond the
     title)}},
 
-  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" | "balance" or null (correction only --
-    which recent-<domain> list target_expense_id refers to; null means "expense", for backward compatibility;
-    "balance" is different from the rest -- see below and the adjust_balance rule),
+  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" | "event" | "balance" or null (correction
+    only -- which recent-<domain> list target_expense_id refers to; null means "expense", for backward
+    compatibility; "balance" is different from the rest -- see below and the adjust_balance rule),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
     list; not applicable/always null for target_domain="balance", which has no recent-item list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "adjust_balance" or null (correction only),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "adjust_balance" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back; never compute or output an
     actual calendar date yourself, that's done in code),
@@ -180,6 +185,19 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "new_task_notes": string or null (correction + edit_task only, target_domain="task" -- ONLY set if the
     message actually adds/changes a note on the to-do, e.g. "I need Shardul's address for that" alongside a
     reschedule),
+  "new_meal_items": [list of strings] or null (correction + edit_meal only, target_domain="meal" -- the FULL
+    corrected item list for the meal, not just what changed -- e.g. removing one wrong item still means
+    re-listing every item that's actually still correct, plus the removal reflected by its absence),
+  "new_meal_type": one of the meal type list or null (correction + edit_meal only -- ONLY set if the message
+    actually changes it),
+  "new_meal_calories_low": number or null (correction + edit_meal only -- re-estimated for the CORRECTED item
+    list, same estimate discipline as log_meal's calories_low; always set together with calories_high/estimate
+    whenever new_meal_items is set),
+  "new_meal_calories_high": number or null (correction + edit_meal only, paired with calories_low above),
+  "new_meal_calories_estimate": number or null (correction + edit_meal only, the central re-estimate, paired
+    with calories_low/high above),
+  "new_meal_water_ml": number or null (correction + edit_meal only -- ONLY set if the message actually changes
+    the water amount; leave null to keep whatever was already logged),
   "new_description": string or null (correction + edit_description only, target_domain="expense"; ALSO reused
     for correction + edit_task, target_domain="task" -- the to-do's corrected title, ONLY set if the message
     actually changes the title itself, not just its due date or notes),
@@ -271,34 +289,45 @@ Deciding the intent:
   (no clear deadline-vs-appointment framing) should prefer "log_task" -- events are for things with a specific
   scheduled day the user framed as an appointment/plan/schedule slot, not for general to-dos that happen to
   have a date.
-- "correction": the message is about something ALREADY logged, in ANY of the four domains -- fixing the
-  currency/amount/description/category/date of a past entry, marking/deleting a to-do, or asking to delete a
-  duplicate/mistake (e.g. "that was SGD not USD", "that was for yesterday", "that was 2 days ago", "you double
-  logged my lunch", "delete that", "actually it was $50 not $15", "that log from yesterday was wrong, tag it to
-  the day before instead", "delete that meal, I logged it twice", "mark the dentist call as done", "I finished
-  that", "delete that task, never mind", "17 done", "task 17 renew esta visa done", "completed task 17 from the
-  tasklist" -- these last three are all target_domain="task", target_expense_id=17, correction_action="mark_done"
-  as long as 17 is an id in the open to-dos list, see the numeric-id-matching rule below) -- OR about the
+- "correction": the message is about something ALREADY logged or scheduled, in ANY domain -- fixing the
+  currency/amount/description/category/date of a past entry, marking/deleting a to-do, correcting what was
+  actually in a logged meal, clearing a scheduled event, or asking to delete a duplicate/mistake (e.g. "that was
+  SGD not USD", "that was for yesterday", "that was 2 days ago", "you double logged my lunch", "delete that",
+  "actually it was $50 not $15", "that log from yesterday was wrong, tag it to the day before instead", "delete
+  that meal, I logged it twice", "minus the ramen noodles, I didn't have that", "mark the dentist call as done",
+  "I finished that", "delete that task, never mind", "17 done", "task 17 renew esta visa done", "completed task
+  17 from the tasklist" -- these last three are all target_domain="task", target_expense_id=17,
+  correction_action="mark_done" as long as 17 is an id in the open to-dos list, see the numeric-id-matching rule
+  below; "the X-ray is done, take it off my schedule", "cancel dinner with Mel", "that appointment got moved,
+  just remove it for now" are target_domain="event", correction_action="delete" as long as the id/title matches
+  the upcoming-events list -- see target_domain="event"'s own paragraph below for why "done" means DELETE there,
+  not mark_done) -- OR about the
   rolled-over balance/deficit itself rather than any one
   logged item (target_domain="balance", see its own paragraph below). First decide target_domain from context
   (an amount/currency strongly implies "expense"; food/calories implies "meal"; a workout activity implies
-  "workout"; a to-do title/deadline implies "task"; the words "balance", "rolled-over", or "deficit" with no
-  specific item being referenced implies "balance" -- when genuinely ambiguous between domains, prefer
-  whichever domain has an item matching the description/date, and if more than one domain plausibly matches,
-  use "clarification" instead). Then identify the ONE matching item in that domain's recent list -- match on
+  "workout"; a to-do title/deadline implies "task"; an appointment/schedule framing implies "event"; the words
+  "balance", "rolled-over", or "deficit" with no specific item being referenced implies "balance" -- when
+  genuinely ambiguous between domains, prefer whichever domain has an item matching the description/date, and if
+  more than one domain plausibly matches, use "clarification" instead). Then identify the ONE matching item in
+  that domain's recent list -- match on
   whatever the message gives you: amount/description, OR just a date/day reference alone (e.g. "yesterday's
   log", "the one from Monday") is enough on its own if exactly one recent item in that domain has that date,
   even with no amount or description mentioned. A bare number the user gives you (with or without a "#", "task",
   or "item" in front of it -- e.g. "17 done", "task 17", "#17", "mark 11 done", "complete 9", "task 17 renew
   esta visa done") is ALSO enough on its own, with no other corroboration needed, AS LONG AS it matches an "id"
-  actually present in that domain's recent list -- to-dos in particular are always shown to the user with their
-  id as a "#N" prefix (see /tasks output), so a bare number referencing a to-do is the NORMAL way a user names
-  one, not a weak or ambiguous signal that needs a title/date match too. Set target_expense_id to its "id". Only
+  actually present in that domain's recent list -- to-dos and events in particular are always shown to the user
+  with their id as a "#N" prefix (see /tasks and /events output), so a bare number referencing one is the NORMAL
+  way a user names it, not a weak or ambiguous signal that needs a title/date match too (see the recent-lists
+  note above on resolving a bare number that matches BOTH a task id and an event id). Set target_expense_id to
+  its "id". Only
   "expense" targets
-  support edit_currency/edit_amount/edit_description/edit_category -- for "meal" or "workout" targets, only
-  "edit_date" and "delete" are supported right now; for "task" targets, "mark_done", "edit_task" (a flexible
-  title/due-date/notes edit -- see below), and "delete" are supported. If the user wants some other field fixed
-  on a meal/workout, use "clarification" and say only those specific corrections work for that domain right
+  support edit_currency/edit_amount/edit_description/edit_category -- for "workout" or "vitals" targets, only
+  "edit_date" and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal" (a flexible
+  items/calories correction -- see below), and "delete" are supported; for "task" targets, "mark_done",
+  "edit_task" (a flexible title/due-date/notes edit -- see below), and "delete" are supported; for "event"
+  targets, only "delete" is supported (an event has no "done" state and rescheduling is command-only right now
+  -- see target_domain="event"'s own paragraph below). If the user wants some other field fixed
+  on a workout/vitals, use "clarification" and say only those specific corrections work for that domain right
   now. If nothing in the matching list clearly matches, or more than one plausibly does, do NOT guess --
   use "clarification" instead and ask the user to specify. If a single message describes MORE THAN ONE
   correction at once, do NOT fall back to "casual" just because it's compound -- pick whichever one is
@@ -327,6 +356,27 @@ Deciding the intent:
   express "in 3 days") -- due_in_days/due_time are the SAME forward day-count fields log_task uses for a
   brand-new to-do, just applied to an existing one. At least one of the three fields must actually be
   changing; if the message is about a to-do but it's unclear WHAT should change, use "clarification" and ask.
+  correction_action="edit_meal" (target_domain="meal" only) corrects what was actually eaten/drunk in an
+  already-logged meal, WITHOUT deleting and relogging it from scratch -- the case this exists for is a photo- or
+  text-logged meal that came out wrong (e.g. an item that wasn't really eaten got included, a portion size was
+  off, something eaten was left out). Examples: "minus the ramen noodles, I didn't have that" (an item removed),
+  "I also had a side salad I forgot to mention" (an item added), "that was a large, not a medium" (a portion
+  correction). Always set new_meal_items to the FULL corrected item list -- use the meal's current items (from
+  the recent-meals list you were given) as the starting point, then add/remove/adjust exactly what the message
+  says, and re-estimate new_meal_calories_low/new_meal_calories_high/new_meal_calories_estimate fresh for that
+  corrected list, the same "plausible range, not false precision" discipline as log_meal -- always set all
+  three together, never left partially null, whenever new_meal_items is set. Only set new_meal_type or
+  new_meal_water_ml if the message specifically changes those too; leave them null otherwise (meaning
+  unchanged). If the message is about a meal but it's unclear what actually changed, use "clarification" and
+  ask what to fix, rather than guessing at what was really eaten.
+  target_domain="event" is a narrower case than every domain above -- an event has no "done" state to set (see
+  events.py's design: it's a flat, dated occurrence, not a to-do), so correction_action is ALWAYS "delete" for
+  it, never "mark_done" -- phrasing like "the X-ray is done", "that appointment already happened", "cancel
+  dinner with Mel", "that's not happening anymore, take it off my schedule" all mean the SAME thing for an
+  event: remove it from the upcoming list. Match target_expense_id against the upcoming-events list the same
+  way as any other domain (title/date, or a bare id). Rescheduling an event to a new day is command-only right
+  now (/rescheduleevent) -- if the message is clearly asking to move an event's date rather than remove it,
+  use "clarification" and point at that command, don't attempt a delete instead.
 - "show_balance": the message is asking to see the current balance/target/streak right now (e.g. "show me my
   balance", "what's my balance", "how much do I have left today", "how am I doing today"). This is answered
   directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,
@@ -470,7 +520,7 @@ Rules for remember/forget fields:
 def parse_message(text: str, recent_expenses: list | None = None, recent_meals: list | None = None,
                    recent_workouts: list | None = None, recent_vitals: list | None = None,
                    recent_tasks: list | None = None, recent_messages: list | None = None,
-                   memory_list: list | None = None) -> dict:
+                   memory_list: list | None = None, recent_events: list | None = None) -> dict:
     """recent_expenses: list of {id, amount, currency, description, category,
     expense_date, is_claimable} dicts, most recent first -- typically the
     last ~8 for this chat. recent_meals / recent_workouts / recent_vitals:
@@ -483,6 +533,18 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
     short-term memory. memory_list: list of {label, category, content}
     dicts (see db.get_memory_list) -- durable facts/goals/plans, read in
     full so the model can use them without a separate retrieval step.
+    recent_events: list of {id, event_title, event_date, event_time} dicts,
+    soonest first (see db.get_upcoming_events) -- what an event correction
+    (delete only -- see events.py's design) may target. Deliberately added
+    as the LAST parameter with a default, appended after every other domain,
+    rather than inserted alongside recent_tasks -- this is a real call-site
+    change (see handlers.py), unlike reminders/events' add/show intents,
+    which needed no new context list at all; the one-off cost of updating
+    every fake_parse_message test double was worth paying here because
+    without this list the model has no way to even know an id like "5"
+    might refer to an event rather than a task, which was a real observed
+    bug (a bare "5 is done" for an event confidently misfired against the
+    task domain instead, with a confusing wrong-domain error reply).
     Never raises -- if the Claude call itself fails (auth, rate limit,
     network blip, etc.), falls back to a clarification response so the bot
     always replies to the user instead of going silent.
@@ -494,6 +556,7 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
     recent_tasks = recent_tasks or []
     recent_messages = recent_messages or []
     memory_list = memory_list or []
+    recent_events = recent_events or []
     user_content = (
         f"Recent expenses (most recent first, only reference an id from here for target_domain=expense):\n"
         f"{json.dumps(recent_expenses)}\n\n"
@@ -505,6 +568,8 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
         f"{json.dumps(recent_vitals)}\n\n"
         f"Open to-dos (soonest due first, only reference an id from here for target_domain=task):\n"
         f"{json.dumps(recent_tasks)}\n\n"
+        f"Upcoming scheduled events (soonest first, only reference an id from here for target_domain=event):\n"
+        f"{json.dumps(recent_events)}\n\n"
         f"Recent conversation history (oldest first):\n"
         f"{json.dumps(recent_messages)}\n\n"
         f"Durable memory (a label, category, and content per item -- only source of remembered facts, only "
@@ -587,6 +652,14 @@ foods, not one dish to average together). Leave it null when the caption is just
 food shown (portion size, ingredients, what it's called), when there's no caption, or when you genuinely can't \
 tell. This exists so the bot can ask which food(s) the user actually wants logged instead of silently merging \
 two different foods into one wrong, over-estimated entry.
+When the caption explicitly and specifically names the dish (e.g. "medium curry gyu don from Sukiya", not just \
+"lunch" or "food"), treat that naming as the AUTHORITATIVE description of what's on the plate -- "items" should \
+list what the caption actually says was eaten, refined by what the photo shows (portion size, visible \
+garnishes), not padded out with extra components you infer are commonly served alongside that dish but can't \
+actually confirm are in THIS photo. A restaurant dish's typical sides/plating are easy to imagine from menu \
+knowledge and easy to mis-see in a photo -- guessing one in is a worse error than leaving it out, since the \
+user explicitly told you what they ate and an uninvited extra item silently inflates their calorie log. If \
+you're not confident an item is really there, leave it out rather than including it "to be safe".
 
 2. A fitness/workout stats screen -- a summary from a fitness app or wearable showing calories burned, active \
 minutes, steps, distance, a named workout, and similar (this is NOT a photo of food, even if calories are on \
@@ -957,6 +1030,12 @@ def _clarify_fallback(message: str) -> dict:
         "new_amount": None,
         "new_description": None,
         "new_category": None,
+        "new_meal_items": None,
+        "new_meal_type": None,
+        "new_meal_calories_low": None,
+        "new_meal_calories_high": None,
+        "new_meal_calories_estimate": None,
+        "new_meal_water_ml": None,
         "memory_label": None,
         "memory_content": None,
         "memory_category": None,

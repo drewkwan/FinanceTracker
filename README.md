@@ -83,6 +83,14 @@ natural-language pattern.
   (wrong) calories — it asks which food(s) you actually want logged, and
   your plain-text answer resolves it, exactly like answering any other
   clarifying question.
+- **An explicit caption is trusted over a visual guess at what's on the
+  plate.** If you name the specific dish ("medium curry gyu don from
+  Sukiya"), Morrow lists what you actually said you ate, refined by what's
+  visible in the photo — it won't pad the item list with extra components
+  (a side, a garnish) it can't actually confirm are really there just
+  because they're commonly served alongside that dish. Guessing an item in
+  is treated as worse than leaving one out, since an uninvited extra item
+  silently inflates the calorie log.
 - **Water is tracked separately from calories.** Mention plain water (e.g.
   "750ml water") and it adds to a running `water_ml` total for the day,
   never estimated for other drinks.
@@ -125,10 +133,20 @@ natural-language pattern.
   meal was actually two days ago" or "delete that, I logged it twice" both
   resolve by natural language, with the same before/after confirmation and
   one-word `undo`. This applies to meals, workouts, and vitals check-ins too.
-  Field-level edits (fixing a calorie estimate, activity name, or a vitals
-  reading) aren't wired up yet for any of the three — only moving the date or
-  deleting an entry — so a request for anything else gets a clarifying
-  message rather than being silently ignored.
+  Field-level edits (fixing an activity name or a vitals reading) aren't
+  wired up yet for workouts/vitals — only moving the date or deleting an
+  entry — so a request for anything else gets a clarifying message rather
+  than being silently ignored.
+- **Meals get one field-level edit that workouts/vitals don't yet: correcting
+  what was actually eaten**, without deleting and relogging from scratch —
+  e.g. "minus the ramen noodles, I didn't have that" or "I also had a side
+  salad". Morrow re-estimates calories fresh for the corrected item list
+  (the same plausible-range discipline as a brand-new log) and applies it in
+  one shot; reverses with one-word `undo` like every other correction. This
+  exists specifically because a photo-logged meal is the one place a
+  hallucinated extra item (see above) is most likely to slip in, and
+  deleting the whole entry to fix one wrong item was real, reported
+  friction.
 
 ## How memory works
 
@@ -289,14 +307,20 @@ startup log warning), but `/morning` still works on demand regardless.
 - **See what's upcoming** with `/events`, or ask naturally ("what's on my
   schedule", "what's coming up") — soonest first, past events left off
   entirely (there's nothing left to show for something that already happened).
-- **Reschedule** with `/rescheduleevent <id> <days from today>`, or
-  **remove** one for good with `/removeevent <id>` — both reverse with
-  one-word `undo`, same as every other correction.
-- **Rescheduling or removing is command-only right now**, not yet natural
-  language — adding one (or a whole batch) and viewing the list both work
-  conversationally, but resolving an existing event by name in free text
-  isn't wired up yet, the same deliberate scope cut as daily reminders' done/
-  remove. Come back to this if it turns out to matter in practice.
+- **Clear one by natural language once it's happened or is no longer
+  relevant** — "the X-ray is done", "cancel dinner with Mel", "that
+  appointment got moved, just remove it for now" all resolve the same way as
+  any other correction, matched against your upcoming events by id or title,
+  with the usual before/after confirmation and one-word `undo`. An event has
+  no "done" state (see above), so "X is done" here means the same thing as
+  "delete X" — there's nothing to mark complete, just something to take off
+  the list. `/removeevent <id>` does the same thing as a command.
+- **Rescheduling is command-only right now**: `/rescheduleevent <id> <days
+  from today>` — reverses with one-word `undo` like everything else. Natural
+  language handles adding, viewing, and clearing an event, but moving one to
+  a new day by free text isn't wired up yet (a correction asking to
+  reschedule gets a clarifying nudge toward the command instead of silently
+  doing nothing). Come back to this if it turns out to matter in practice.
 - **Deliberately flat, not truly recurring.** There's no "every Wednesday"
   rule here — a real recurring event needs day-of-week/interval matching plus
   the classic "edit one occurrence vs. all future occurrences" problem,
@@ -475,6 +499,8 @@ without needing the expense's ID:
 > no, my lunch was in SGD not USD
 > you double logged my lunch, delete one
 > that log from yesterday was wrong, tag it to the day before instead
+> minus the ramen noodles, I didn't have that
+> the X-ray is done, take it off my schedule
 
 The bot looks at your last few logged expenses, figures out which one you
 mean — by amount, description, or a date reference alone (e.g. "yesterday's

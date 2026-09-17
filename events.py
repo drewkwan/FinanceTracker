@@ -17,14 +17,22 @@ flat events now fully covers it without guessing at recurrence design ahead
 of a real driving case. True recurrence can be designed properly later, once
 there's a concrete need for it.
 
-Same natural-language scope cut as reminders.py, for the same reason: ADD
-(a single event, or a whole list in one message -- e.g. seven workout slots
-for the week) and SHOW work directly through the add_event/show_events
-intents, but rescheduling or removing a specific event is slash-command-only
-(/rescheduleevent <id> <days from today>, /removeevent <id>) -- avoiding a
-new recent-events list threaded into ai.parse_message's signature (and
-every existing fake_parse_message test double) for a feature not yet asked
-for.
+ADD (a single event, or a whole list in one message -- e.g. seven workout
+slots for the week) and SHOW work directly through the add_event/show_events
+intents. Clearing an existing event ALSO works by natural language, but
+through correction.py's target_domain="event" path (action "delete" only --
+see its own module docstring), not through a dedicated intent here -- "the
+X-ray is done"/"cancel dinner with Mel" reads as a correction, the same as
+"delete that expense" or "mark the dentist call done". This needed
+ai.parse_message to be handed a recent-upcoming-events list (see its
+docstring for why that was a real, deliberate signature change, not the
+same "avoid widening the call" cut reminders.py made) -- added after a real
+observed bug: without it, an event id had no way to be told apart from a
+task id, so "X is done" against an event confidently misfired as a task
+correction instead. Rescheduling remains slash-command-only
+(/rescheduleevent <id> <days from today>) -- there's no natural "this is
+what changed" shape for it the way there is for a delete, so it's deferred
+until there's a concrete case to design it against.
 """
 
 from datetime import date, timedelta

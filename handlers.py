@@ -80,6 +80,17 @@ def _recent_messages_for_ai(chat_id: int) -> list:
     return [{"role": r["role"], "content": r["content"]} for r in rows]
 
 
+def _recent_events_for_ai(chat_id: int) -> list:
+    """Upcoming (today forward) events, soonest first -- what an event
+    correction (delete only -- see events.py's design) may target. Without
+    this, the model has no way to know a bare id might refer to an event
+    rather than a task -- a real observed bug (see ai.parse_message's
+    docstring)."""
+    rows = db.get_upcoming_events(chat_id, limit=20)
+    return [{"id": r["id"], "event_title": r["title"], "event_date": r["event_date"],
+             "event_time": r["event_time"]} for r in rows]
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_allowed(update):
         return
@@ -131,6 +142,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_vitals_ids = {r["id"] for r in recent_vitals}
     recent_tasks = _recent_tasks_for_ai(chat_id)
     recent_task_ids = {r["id"] for r in recent_tasks}
+    recent_events = _recent_events_for_ai(chat_id)
+    recent_event_ids = {r["id"] for r in recent_events}
     # The message just added above is deliberately included here -- the
     # model should see its own current turn as part of the running thread,
     # not just what came before it.
@@ -141,11 +154,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # We asked a clarifying question; treat this message as the answer.
         merged_text = f"{pending['original']}\n(Additional info: {text})"
         parsed = ai.parse_message(merged_text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_tasks, recent_messages, memory_list)
+                                   recent_tasks, recent_messages, memory_list, recent_events)
     else:
         merged_text = text
         parsed = ai.parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_tasks, recent_messages, memory_list)
+                                   recent_tasks, recent_messages, memory_list, recent_events)
 
     intent = parsed.get("intent")
 
@@ -170,12 +183,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # right values against a recent-id set that didn't contain them).
         logger.info(
             "correction parsed: chat_id=%s text=%r target_domain=%r target_expense_id=%r "
-            "correction_action=%r recent_task_ids=%s",
+            "correction_action=%r recent_task_ids=%s recent_event_ids=%s",
             chat_id, merged_text, parsed.get("target_domain"), parsed.get("target_expense_id"),
-            parsed.get("correction_action"), sorted(recent_task_ids),
+            parsed.get("correction_action"), sorted(recent_task_ids), sorted(recent_event_ids),
         )
         await _handle_correction(update, context, parsed, recent_ids, recent_meal_ids,
-                                  recent_workout_ids, recent_vitals_ids, recent_task_ids)
+                                  recent_workout_ids, recent_vitals_ids, recent_task_ids, recent_event_ids)
         return
 
     if intent == "show_balance":

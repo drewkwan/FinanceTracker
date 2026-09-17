@@ -206,13 +206,131 @@ def test_removeevent_command_with_unknown_id():
     assert any("Couldn't find" in r for r in update.message.replies)
 
 
+# ---------- natural-language correction: "X is done" clears an event ----------
+#
+# Regression tests for a real observed bug: an event has no "done" state,
+# but "5 is done" against an event id used to confidently misfire as a task
+# correction instead (no task with that id existed, so it always fell
+# through to the generic, wrong-sounding "I'm not sure which to-do you
+# mean"). Fixed by giving the model an upcoming-events list to match
+# against and treating "done"/"already happened" as correction_action=
+# "delete" for target_domain="event" (see correction.py's EVENT_DOMAIN_ACTIONS
+# and ai.py's target_domain="event" prompt rules).
+
+def test_correction_can_clear_an_event_by_domain(monkeypatch):
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "X-ray for foot", _in_days(0), event_time="08:30")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "delete", "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="5 is done")
+    _run(bot.handle_text(update, FakeContext()))
+    assert db.get_event(CHAT, event_id) is None
+    assert any("Deleted" in r for r in update.message.replies)
+
+
+def test_undo_reverts_an_event_correction_deletion(monkeypatch):
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "X-ray for foot", _in_days(0), event_time="08:30")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "delete", "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    delete_update = FakeUpdate(CHAT, text="5 is done")
+    _run(bot.handle_text(delete_update, context))
+    assert db.get_event(CHAT, event_id) is None
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_upcoming_events(CHAT)[0]["title"] == "X-ray for foot"
+
+
+def test_event_correction_with_unmatched_id_says_not_sure(monkeypatch):
+    """The id genuinely doesn't match any upcoming event -- a different
+    failure mode from "found it, but that action isn't supported" (see the
+    next test), and deliberately worded differently (see
+    correction.py's _handle_simple_domain_correction)."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": 9999,
+            "correction_action": "delete", "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="9999 is done")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "not sure which event" in reply
+    assert "Found that" not in reply
+
+
+def test_event_correction_rejects_unsupported_reschedule_action(monkeypatch):
+    """Rescheduling stays command-only (/rescheduleevent) -- a correction
+    attempting edit_date against an event must hit the "found it, but
+    that's not supported" branch, not silently succeed or look like the
+    event wasn't found at all."""
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Company Tennis", _in_days(2))
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "edit_date", "days_ago": 0,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="move that to today instead")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "Found that event" in reply
+    assert "isn't supported yet" in reply
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(2)  # untouched
+
+
+# ---------- handlers._recent_events_for_ai ----------
+
+def test_recent_events_for_ai_only_includes_upcoming():
+    import handlers
+    db.get_or_create_user(CHAT)
+    db.add_event(CHAT, "past thing", (dt.date.today() - dt.timedelta(days=1)).isoformat())
+    db.add_event(CHAT, "Dinner with Mel", _in_days(3))
+    rows = handlers._recent_events_for_ai(CHAT)
+    assert [r["event_title"] for r in rows] == ["Dinner with Mel"]
+    assert {"id", "event_title", "event_date", "event_time"} <= rows[0].keys()
+
+
 # ---------- natural language: add_event / show_events ----------
 
 def test_natural_language_add_single_event_computes_date_deterministically(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {
             "intent": "add_event",
             "events": [{"event_title": "Dinner with Mel", "event_in_days": 6, "event_time": None,
@@ -232,7 +350,8 @@ def test_natural_language_add_event_with_no_events_asks_instead_of_guessing(monk
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {"intent": "add_event", "events": [], "clarification_question": None, "casual_reply": None}
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
@@ -253,7 +372,8 @@ def test_natural_language_add_a_weeks_worth_of_events_logs_every_one(monkeypatch
     ]
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {
             "intent": "add_event",
             "events": [{"event_title": t, "event_in_days": n, "event_time": None, "event_notes": None}
@@ -278,7 +398,8 @@ def test_natural_language_show_events(monkeypatch):
     db.add_event(CHAT, "Dinner with Mel", _in_days(3))
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
-                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None):
         return {"intent": "show_events", "clarification_question": None, "casual_reply": None}
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)

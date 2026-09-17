@@ -743,6 +743,48 @@ def edit_meal_date(chat_id: int, meal_id: int, new_date_str: str) -> dict | None
     return get_meal(chat_id, meal_id)
 
 
+# Distinct from None -- a meal/to-do's editable fields are legitimately
+# nullable, so None is a real value ("clear this field") that edit_meal/
+# edit_task must be able to set on purpose (e.g. undoing an edit that added
+# a due date to a task that previously had none). _UNSET is the "caller
+# didn't mention this field at all" default instead, the same "only touches
+# what's passed" discipline as edit_expense, but edit_expense never needs to
+# null out amount/description/category, so it never ran into this. Defined
+# here, before its first use (edit_meal, below) -- a default argument value
+# is bound at `def` time, not call time, so it has to exist by the time
+# Python evaluates this function's signature, not just by the time it runs.
+_UNSET = object()
+
+
+def edit_meal(chat_id: int, meal_id: int, new_meal_type=_UNSET, new_items=_UNSET, new_calories_low=_UNSET,
+              new_calories_high=_UNSET, new_calories_estimate=_UNSET, new_water_ml=_UNSET) -> dict | None:
+    """Corrects what was actually in an already-logged meal -- e.g. an item a
+    photo (or the model) added that wasn't really eaten -- without deleting
+    and relogging from scratch. Mirrors edit_task's _UNSET "only touch what's
+    passed" discipline (see its docstring for why that's not the same as
+    passing None), but unlike edit_task the three calorie fields are meant to
+    always be set together whenever items changes (see correction.py's
+    edit_meal handling) -- a corrected item list with a stale calorie
+    estimate would be worse than not correcting it at all."""
+    row = get_meal(chat_id, meal_id)
+    if row is None:
+        return None
+    final_meal_type = row["meal_type"] if new_meal_type is _UNSET else new_meal_type
+    final_items = row["items"] if new_items is _UNSET else new_items
+    final_low = row["calories_low"] if new_calories_low is _UNSET else new_calories_low
+    final_high = row["calories_high"] if new_calories_high is _UNSET else new_calories_high
+    final_estimate = row["calories_estimate"] if new_calories_estimate is _UNSET else new_calories_estimate
+    final_water_ml = row["water_ml"] if new_water_ml is _UNSET else new_water_ml
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE meals SET meal_type = ?, items = ?, calories_low = ?, calories_high = ?, "
+            "calories_estimate = ?, water_ml = ? WHERE id = ? AND chat_id = ?",
+            (final_meal_type, json.dumps(final_items or []), final_low, final_high, final_estimate,
+             final_water_ml, meal_id, chat_id),
+        )
+    return get_meal(chat_id, meal_id)
+
+
 def delete_meal(chat_id: int, meal_id: int) -> dict | None:
     row = get_meal(chat_id, meal_id)
     if row is None:
@@ -1111,17 +1153,6 @@ def edit_task_due(chat_id: int, task_id: int, new_due_at: str | None) -> dict | 
             "UPDATE tasks SET due_at = ? WHERE id = ? AND chat_id = ?", (new_due_at, task_id, chat_id)
         )
     return get_task(chat_id, task_id)
-
-
-# Distinct from None -- a to-do's due_at/notes are legitimately nullable, so
-# None is a real value ("clear this field") that edit_task must be able to
-# set on purpose (e.g. undoing an edit that added a due date to a task that
-# previously had none). _UNSET is the "caller didn't mention this field at
-# all" default instead, the same "only touches what's passed" discipline as
-# edit_expense, but edit_expense never needs to null out amount/description/
-# category, so it never ran into this -- a task's due date and notes both
-# can legitimately go back to "nothing" on revert.
-_UNSET = object()
 
 
 def edit_task(chat_id: int, task_id: int, new_title=_UNSET, new_due_at=_UNSET, new_notes=_UNSET) -> dict | None:

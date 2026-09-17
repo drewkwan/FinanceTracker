@@ -297,7 +297,7 @@ def test_natural_language_log_meal_updates_running_total(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         return _log_meal_response()
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
@@ -319,7 +319,7 @@ def test_natural_language_log_meal_with_two_meals_logs_both(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         return _log_meal_response(meals=[
             {"meal_type": "Breakfast", "items": ["toast with strawberry jam", "Old Town white coffee"],
              "calories_low": 320, "calories_high": 420, "calories_estimate": 370, "water_ml": None},
@@ -491,7 +491,7 @@ def test_resolving_a_photo_caption_clarification_logs_only_what_the_user_confirm
     _run(bot.handle_photo(photo_update, context))
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         assert "black bean pork broth" in text and "nachos" in text  # the pending context must reach the model
         return _log_meal_response(meals=[{
             "meal_type": "Dinner", "items": ["black bean pork broth"],
@@ -512,7 +512,7 @@ def test_natural_language_log_workout(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         return {"intent": "log_workout", "activity": "tennis", "duration_min": 60,
                 "distance_km": None, "workout_notes": "won 2 sets",
                 "clarification_question": None, "casual_reply": None}
@@ -531,7 +531,7 @@ def test_correction_can_target_a_meal_by_domain(monkeypatch):
     meal_id = db.add_meal(CHAT, "Snack", ["duplicate mango"], 90, 120, 105)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         return {
             "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
             "correction_action": "delete", "days_ago": None,
@@ -550,7 +550,7 @@ def test_undo_reverts_a_meal_deletion(monkeypatch):
     meal_id = db.add_meal(CHAT, "Snack", ["mango"], 90, 120, 105)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
         return {
             "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
             "correction_action": "delete", "days_ago": None,
@@ -566,6 +566,90 @@ def test_undo_reverts_a_meal_deletion(monkeypatch):
     undo_update = FakeUpdate(CHAT, text="undo")
     _run(bot.handle_text(undo_update, context))
     assert db.get_recent_meals(CHAT)[0]["items"] == ["mango"]
+
+
+def test_correction_can_edit_a_meal_to_remove_a_hallucinated_item(monkeypatch):
+    """Regression test for a real bad interaction: a photo of a curry gyu don
+    added "ramen noodles" that were never actually eaten, and the only way
+    to fix it was deleting the whole meal and relogging it from scratch.
+    edit_meal lets the model send back the FULL corrected item list plus a
+    fresh calorie re-estimate for it, applied in one shot via db.edit_meal."""
+    db.get_or_create_user(CHAT)
+    meal_id = db.add_meal(CHAT, "Lunch", ["curry gyu don (beef curry rice)", "ramen noodles"], 850, 1050, 950)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
+            "correction_action": "edit_meal", "days_ago": None,
+            "new_meal_items": ["curry gyu don (beef curry rice)"],
+            "new_meal_calories_low": 550, "new_meal_calories_high": 750, "new_meal_calories_estimate": 650,
+            "new_meal_type": None, "new_meal_water_ml": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="minus the ramen noodles, I didn't have that")
+    _run(bot.handle_text(update, FakeContext()))
+
+    row = db.get_meal(CHAT, meal_id)
+    assert row["items"] == ["curry gyu don (beef curry rice)"]
+    assert row["calories_estimate"] == 650
+    assert any("Updated" in r for r in update.message.replies)
+
+
+def test_undo_reverts_a_meal_edit(monkeypatch):
+    db.get_or_create_user(CHAT)
+    meal_id = db.add_meal(CHAT, "Lunch", ["curry gyu don (beef curry rice)", "ramen noodles"], 850, 1050, 950)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
+            "correction_action": "edit_meal", "days_ago": None,
+            "new_meal_items": ["curry gyu don (beef curry rice)"],
+            "new_meal_calories_low": 550, "new_meal_calories_high": 750, "new_meal_calories_estimate": 650,
+            "new_meal_type": None, "new_meal_water_ml": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    edit_update = FakeUpdate(CHAT, text="minus the ramen noodles, I didn't have that")
+    _run(bot.handle_text(edit_update, context))
+    assert db.get_meal(CHAT, meal_id)["items"] == ["curry gyu don (beef curry rice)"]
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    row = db.get_meal(CHAT, meal_id)
+    assert row["items"] == ["curry gyu don (beef curry rice)", "ramen noodles"]
+    assert row["calories_estimate"] == 950
+
+
+def test_meal_correction_found_but_unsupported_action_says_so_distinctly(monkeypatch):
+    """The id WAS matched correctly here -- only the action itself isn't
+    supported for meals (e.g. edit_category, which only expenses support).
+    This must read differently from "I'm not sure which meal you mean" --
+    conflating the two was a real observed bug (see correction.py's
+    _handle_simple_domain_correction docstring)."""
+    db.get_or_create_user(CHAT)
+    meal_id = db.add_meal(CHAT, "Lunch", ["gyu don"], 550, 750, 650)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+        return {
+            "intent": "correction", "target_domain": "meal", "target_expense_id": meal_id,
+            "correction_action": "edit_category", "days_ago": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="recategorize that")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "Found that meal" in reply
+    assert "isn't supported yet" in reply
+    assert db.get_meal(CHAT, meal_id)["items"] == ["gyu don"]  # untouched
 
 
 # ---------- duplicate-workout detection (two photos, same underlying data) ----------
