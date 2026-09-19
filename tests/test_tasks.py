@@ -105,6 +105,28 @@ def test_extract_task_never_raises_on_api_failure(monkeypatch):
     assert result["due_in_days"] is None
 
 
+def test_extract_task_tells_the_model_todays_actual_date(monkeypatch):
+    """Same root-cause guard as test_ai.py's parse_message version: an
+    explicit due date like "due 18 September" needs today's real date to
+    compute due_in_days against -- can't be done from a relative word alone."""
+    monkeypatch.setattr(db, "today_str", lambda: "2026-09-19")
+    captured = {}
+
+    class _CapturingClient(_FakeClient):
+        def create(self, **kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return super().create(**kwargs)
+
+    fake = _CapturingClient(json.dumps(
+        {"title": "renew passport", "due_in_days": None, "due_time": None, "notes": None}
+    ))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    ai.extract_task("renew passport")
+    sent_content = captured["messages"][0]["content"]
+    assert "2026-09-19" in sent_content
+    assert "Saturday" in sent_content
+
+
 def test_parse_message_passes_recent_tasks_into_the_prompt(monkeypatch):
     captured = {}
 

@@ -164,6 +164,32 @@ def test_extract_from_photo_sends_image_content_block(monkeypatch):
     assert result["calories_estimate"] == 1170
 
 
+def test_extract_from_photo_tells_the_model_todays_actual_date(monkeypatch):
+    """Root-cause regression guard for the real reported bug: a photo
+    captioned "Stats from 18 September" needs today's real date to compute
+    logged_days_ago against an explicit date -- relative phrasing alone
+    doesn't need this, which is exactly why the gap went unnoticed."""
+    import json
+    monkeypatch.setattr(db, "today_str", lambda: "2026-09-19")
+    captured = {}
+
+    class _CapturingClient(_FakeClient):
+        def create(self, **kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return super().create(**kwargs)
+
+    payload = {"kind": "meal", "meal_type": "Dinner", "items": ["rice"], "calories_low": 100,
+               "calories_high": 200, "calories_estimate": 150, "water_ml": None}
+    fake = _CapturingClient(json.dumps(payload))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+
+    ai.extract_from_photo(b"fake-jpeg-bytes", caption="Stats from 18 September")
+    content_blocks = captured["messages"][0]["content"]
+    text_block = next(b["text"] for b in content_blocks if b["type"] == "text")
+    assert "2026-09-19" in text_block
+    assert "Saturday" in text_block
+
+
 def test_extract_from_photo_never_raises_on_api_failure(monkeypatch):
     _mock_client(monkeypatch, TypeError("boom"))
     result = ai.extract_from_photo(b"bytes", caption="dinner")

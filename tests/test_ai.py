@@ -12,6 +12,7 @@ import json
 import pytest
 
 import ai
+import db
 
 
 class _FakeContentBlock:
@@ -128,6 +129,33 @@ def test_parse_message_passes_recent_expenses_into_the_prompt(monkeypatch):
     sent_content = captured["messages"][0]["content"]
     assert "42" in sent_content
     assert "parking cashcard top-up" in sent_content
+
+
+def test_parse_message_tells_the_model_todays_actual_date(monkeypatch):
+    """Root-cause regression guard for the real bug: 'on 18 September' and
+    similar explicit/absolute dates silently logged onto today because the
+    model was never told what today's date IS -- only ever asked to compute
+    offsets FROM today. Pins db.today_str() to a known value and checks that
+    exact date (and weekday) actually reaches the sent prompt content."""
+    monkeypatch.setattr(db, "today_str", lambda: "2026-09-19")
+    captured = {}
+
+    class _CapturingClient(_FakeClient):
+        def create(self, **kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return super().create(**kwargs)
+
+    fake = _CapturingClient(json.dumps({
+        "intent": "casual", "amount": None, "currency": None, "description": None, "category": None,
+        "is_claimable": None, "target_expense_id": None, "correction_action": None, "days_ago": None,
+        "new_currency": None, "new_amount": None, "new_description": None, "new_category": None,
+        "clarification_question": None, "casual_reply": "hey!",
+    }))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    ai.parse_message("hi", [])
+    sent_content = captured["messages"][0]["content"]
+    assert "2026-09-19" in sent_content
+    assert "Saturday" in sent_content
 
 
 # ---------- parse_message: casual intent ----------

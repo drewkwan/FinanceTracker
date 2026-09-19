@@ -49,9 +49,12 @@ dates or reporting on state changes itself.
 import base64
 import json
 import logging
+from datetime import date
+
 import anthropic
 
 import config
+import db
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,26 @@ def _get_client():
     if _client is None:
         _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     return _client
+
+
+def _today_context() -> str:
+    """The one place "today" is actually stated for the model. Every
+    day-count field in this file (logged_days_ago, days_ago, due_in_days,
+    event_in_days) asks the model to compute an offset FROM today -- but
+    until this existed, the model was never told what today's date IS, so
+    it had no way to do that arithmetic for an explicit calendar date. A
+    real reported bug: "...on 18 September" and a photo captioned "Stats
+    from 18 September" both silently landed on today instead -- relative
+    phrasing ("yesterday", "last night") had happened to keep working,
+    since those don't require knowing the actual date, which is exactly
+    why the gap went unnoticed until an absolute date was used. Computed
+    fresh on every call and injected into each per-call user message
+    (never baked into a module-level system-prompt constant, several of
+    which are f-strings built once at import time) -- this process stays
+    running across midnight, so a frozen date would just reintroduce the
+    same bug a day later."""
+    today = date.fromisoformat(db.today_str())
+    return f"Today's actual date is {today.isoformat()} ({today.strftime('%A')})."
 
 
 CATEGORY_LIST = ", ".join(config.CATEGORIES)
@@ -160,7 +183,9 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     one] each shaped: {{"title": short actionable phrase for what needs doing, "due_in_days": integer or null
     (0 = due today, 1 = due tomorrow, 2 = due in two days, etc.; null if no due date was mentioned for THIS
     item -- other items in the same list may have their own different due dates. Extract WHICH day as a plain
-    count of days from today; never compute or output an actual calendar date yourself, that's done in code),
+    count of days from today -- for an explicit date/weekday ("due the 25th", "due next Wednesday"), compute
+    this against "Today's actual date" given at the top of this message; never compute or output an actual
+    calendar date yourself, that's done in code),
     "due_time": "HH:MM" 24-hour time or null (ONLY if a specific clock time was mentioned alongside this item's
     date, e.g. "by 5pm friday" -> "17:00"), "notes": string or null (any extra detail worth keeping beyond the
     title)}},
@@ -172,13 +197,16 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     list; not applicable/always null for target_domain="balance", which has no recent-item list),
   "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "adjust_balance" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
-    up to 14. Extract WHICH day the user means as a plain count of days back; never compute or output an
-    actual calendar date yourself, that's done in code),
+    up to 14. Extract WHICH day the user means as a plain count of days back -- for an explicit calendar date
+    or weekday ("move it to the 18th"), compute this against "Today's actual date" given at the top of this
+    message, the same as logged_days_ago above; never compute or output an actual calendar date yourself,
+    that's done in code),
   "due_in_days": integer or null (correction + edit_task only, target_domain="task", ONLY set if the message
     actually changes the due date -- 0 = due today, 1 = due tomorrow, 2 = due in two days, etc.; forward-
     looking, the opposite direction from days_ago, and unlike days_ago there's no 14-day cap since due dates
-    can be far in the future. Extract WHICH day as a plain count of days from today; never compute or output
-    an actual calendar date yourself, that's done in code),
+    can be far in the future. Extract WHICH day as a plain count of days from today -- compute an explicit
+    date/weekday against "Today's actual date" the same way; never compute or output an actual calendar date
+    yourself, that's done in code),
   "due_time": string or null (correction + edit_task only -- "HH:MM" 24-hour time ONLY if a specific clock time
     was mentioned alongside the new date, e.g. "push it to 5pm tomorrow" -> "17:00"; null otherwise),
   "new_currency": one of the currency list or null (correction + edit_currency only),
@@ -215,8 +243,10 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     "Monday pull day, Tuesday run intervals, Wednesday tennis...") means one object per day, not one merged
     entry] each shaped: {{"event_title": short description of what's happening, e.g. "Dinner with Mel", "Pull
     day in the gym", "event_in_days": integer count of days from today (0 = today, 1 = tomorrow, 2 = day after,
-    etc.) -- REQUIRED for an event to be logged; if genuinely no day can be determined for an item, still
-    include the object with event_in_days null rather than dropping it, "event_time": "HH:MM" 24-hour time or
+    etc.; for an explicit date/weekday, e.g. "dinner on the 25th", compute this against "Today's actual date"
+    given at the top of this message) -- REQUIRED for an event to be logged; if genuinely no day can be
+    determined for an item, still include the object with event_in_days null rather than dropping it,
+    "event_time": "HH:MM" 24-hour time or
     null (ONLY if a specific clock time was mentioned for this item), "event_notes": string or null (any extra
     detail worth keeping)}},
 
@@ -311,7 +341,19 @@ Deciding the intent:
   "workout"; a to-do title/deadline implies "task"; an appointment/schedule framing implies "event"; the words
   "balance", "rolled-over", or "deficit" with no specific item being referenced implies "balance" -- when
   genuinely ambiguous between domains, prefer whichever domain has an item matching the description/date, and if
-  more than one domain plausibly matches, use "clarification" instead). Then identify the ONE matching item in
+  more than one domain plausibly matches, use "clarification" instead). IMPORTANT exception for edit_date: a bare
+  date-only correction with no other domain-identifying content at all (e.g. just "it's for 18 September",
+  "that was last night", "for yesterday", no amount/food/workout words) is almost always fixing whatever the
+  assistant's OWN immediately preceding reply in the conversation history just logged -- default target_domain
+  to THAT domain and target THAT item's id, not a domain picked by searching recent lists for an item that
+  already happens to have the mentioned date. That "matching date" search is for finding WHICH item the user
+  means when several plausibly qualify (e.g. "the one from Monday" with two Monday expenses); it inverts badly
+  for edit_date, where the whole point is that the item currently has the WRONG date -- an item that already
+  carries the date the user just said is exactly the item that does NOT need this correction. Falling back to a
+  match against an unrelated domain's already-correctly-dated item instead of the domain that was just logged
+  into is a real observed bug: it silently no-ops (the date doesn't change because it already matched) and
+  leaves the actual wrong-dated item -- the one the user was clearly reacting to -- untouched. Once target_domain
+  is settled, identify the ONE matching item in
   that domain's recent list -- match on
   whatever the message gives you: amount/description, OR just a date/day reference alone (e.g. "yesterday's
   log", "the one from Monday") is enough on its own if exactly one recent item in that domain has that date,
@@ -464,13 +506,18 @@ Deciding the intent:
 logged_days_ago rule (log_expense, log_meal, log_workout, log_vitals -- whenever something is being logged
 NOW for something that happened on an EARLIER day, not corrected after the fact): 0 = today/tonight (same as
 leaving it null -- today is the default), 1 = yesterday/last night, 2 = two days ago, etc., up to 14. Set it
-whenever the message itself names or clearly implies a day other than today -- "last night I also had...",
-"yesterday's lunch was...", "this morning I did...", "on Monday I ran...". A real bug this fixes: "last night I
-also had a cup of tea" got logged onto today (the message's own send time) instead of the previous day, purely
-because there was no field to carry that -- the user had to notice and correct it by hand afterwards. Extract
-WHICH day as a plain count of days back, exactly like correction's own "days_ago" below; never compute or
-output an actual calendar date yourself, that's done in code. Leave it null (not 0) when the message doesn't
-say or imply anything about timing -- most messages don't, and today is already the right default without it.
+whenever the message itself names or clearly implies a day other than today -- both a RELATIVE phrase
+("last night I also had...", "yesterday's lunch was...", "this morning I did...") and an EXPLICIT calendar
+date or weekday ("on 18 September", "on the 18th", "on Monday") -- compute the actual day-count for the
+explicit case using "Today's actual date" given at the very top of this message; never guess or leave it null
+just because the message named a date instead of a relative word. A real bug this fixes: "on 18 September" and
+a photo captioned "Stats from 18 September" both got logged onto today anyway -- relative phrases like
+"yesterday" happened to still work (no date arithmetic needed to know that's 1 day back), which is exactly why
+the gap wasn't obvious: nothing in this prompt ever stated what today's actual date IS, so an explicit calendar
+date had nothing to compute the offset against and silently fell back to today. Extract WHICH day as a plain
+count of days back, exactly like correction's own "days_ago" below; never compute or output an actual calendar
+date yourself, that's done in code. Leave it null (not 0) when the message doesn't say or imply anything about
+timing -- most messages don't, and today is already the right default without it.
 
 Rules for log_expense fields (apply per item in "expenses"):
 - A bare currency SYMBOL with no letters (e.g. "$", "£") is ambiguous on its own -- default it to the base
@@ -583,6 +630,7 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
     memory_list = memory_list or []
     recent_events = recent_events or []
     user_content = (
+        f"{_today_context()}\n\n"
         f"Recent expenses (most recent first, only reference an id from here for target_domain=expense):\n"
         f"{json.dumps(recent_expenses)}\n\n"
         f"Recent meals (most recent first, only reference an id from here for target_domain=meal):\n"
@@ -705,9 +753,12 @@ the photo -- that produces a nonsense logged entry, which is worse than asking.
 
 "logged_days_ago" (both "meal" and "workout") is how many days ago the food/activity actually happened, as a \
 plain integer count -- 0 = today, 1 = yesterday, 2 = two days ago, etc. -- ONLY set this when the caption \
-clearly states or implies a specific past day (e.g. "these were my stats for 15 September", "this was \
-yesterday's lunch", "from Tuesday's workout"); leave it null when the caption doesn't mention a day at all, \
-since the photo was just sent and defaults to today. Extract ONLY the day-count -- NEVER compute or output an \
+clearly states or implies a specific past day, whether a RELATIVE phrase ("this was yesterday's lunch", "from \
+Tuesday's workout") or an EXPLICIT calendar date ("these were my stats for 15 September", "stats from the \
+18th"); for the explicit case, compute the actual day-count using "Today's actual date", stated at the very \
+start of the message alongside the photo(s) -- never guess or leave it null just because a date was named \
+instead of a relative word. Leave it null when the caption doesn't mention a day at all, since the photo was \
+just sent and defaults to today. Extract ONLY the day-count -- NEVER compute or output an \
 actual calendar date yourself; the bot converts your count into a real date deterministically, the same \
 discipline used for every other date field in this app. Cap it at 14 (two weeks) -- if the caption implies \
 something older than that, leave logged_days_ago null instead of guessing a huge number."""
@@ -786,7 +837,7 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
     b64 = base64.b64encode(image_bytes).decode("ascii")
     user_content = [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-        {"type": "text", "text": caption or "What does this photo show?"},
+        {"type": "text", "text": f"{_today_context()} " + (caption or "What does this photo show?")},
     ]
     return _classify_photo_content(user_content, "extract_from_photo")
 
@@ -833,7 +884,8 @@ def extract_from_photos(images: list[bytes], caption: str | None = None) -> dict
     ]
     user_content.append({
         "type": "text",
-        "text": f"({len(images)} photos sent together in one message.) " + (caption or "What do these show?"),
+        "text": (f"{_today_context()} ({len(images)} photos sent together in one message.) "
+                 + (caption or "What do these show?")),
     })
     return _classify_photo_content(user_content, "extract_from_photos", extra_system_note=MULTI_PHOTO_NOTE)
 
@@ -915,7 +967,10 @@ JSON object: {"title": short actionable phrase capturing what needs doing, "due_
 days from today (0 = today, 1 = tomorrow, 2 = day after, etc.) or null if no due date was mentioned, \
 "due_time": "HH:MM" 24-hour time ONLY if a specific clock time was mentioned alongside the date (e.g. "by 5pm \
 friday" -> "17:00"), else null, "notes": a short string capturing anything else worth keeping, or null}. Never \
-invent a due date or time that wasn't mentioned."""
+invent a due date or time that wasn't mentioned. The message you're given starts with "Today's actual date is \
+..." -- use it to compute due_in_days for an explicit calendar date or weekday ("due the 25th", "by next \
+Wednesday"), not just a relative phrase like "tomorrow"; never guess or leave it null just because the date \
+was named explicitly rather than said relatively."""
 
 
 def extract_task(description: str) -> dict:
@@ -930,7 +985,7 @@ def extract_task(description: str) -> dict:
             model=config.CLAUDE_MODEL,
             max_tokens=150,
             system=TASK_EXTRACT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": description or "to-do"}],
+            messages=[{"role": "user", "content": f"{_today_context()} {description or 'to-do'}"}],
         )
         raw = resp.content[0].text.strip()
         data = _parse_json_or_none(raw)
@@ -945,7 +1000,10 @@ Reply with ONLY a JSON object: {"title": short specific description of what's ha
 Mel", "Dentist appointment"), "event_in_days": integer count of days from today (0 = today, 1 = tomorrow, 2 = \
 day after, etc.) or null if no day could be determined, "event_time": "HH:MM" 24-hour time ONLY if a specific \
 clock time was mentioned (e.g. "at 3pm" -> "15:00"), else null, "notes": a short string capturing anything else \
-worth keeping, or null}. Never invent a day or time that wasn't mentioned."""
+worth keeping, or null}. Never invent a day or time that wasn't mentioned. The message you're given starts \
+with "Today's actual date is ..." -- use it to compute event_in_days for an explicit calendar date or weekday \
+("dinner on the 25th", "next Wednesday"), not just a relative phrase like "tomorrow"; never guess or leave it \
+null just because the date was named explicitly rather than said relatively."""
 
 
 def extract_event(description: str) -> dict:
@@ -960,7 +1018,7 @@ def extract_event(description: str) -> dict:
             model=config.CLAUDE_MODEL,
             max_tokens=150,
             system=EVENT_EXTRACT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": description or "event"}],
+            messages=[{"role": "user", "content": f"{_today_context()} {description or 'event'}"}],
         )
         raw = resp.content[0].text.strip()
         data = _parse_json_or_none(raw)

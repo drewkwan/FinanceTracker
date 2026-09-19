@@ -18,7 +18,7 @@ import ai
 import bot
 import db
 from conftest import CHAT
-from test_ai import _mock_client
+from test_ai import _FakeClient, _mock_client
 from test_meals_workouts import FakeContext, FakeUpdate
 
 
@@ -107,6 +107,28 @@ def test_extract_event_never_raises_on_api_failure(monkeypatch):
     result = ai.extract_event("dinner with Mel")
     assert result["title"] == "dinner with Mel"  # raw text preserved rather than lost
     assert result["event_in_days"] is None
+
+
+def test_extract_event_tells_the_model_todays_actual_date(monkeypatch):
+    """Same root-cause guard as test_ai.py's parse_message version: an
+    explicit event date like "on 18 September" needs today's real date to
+    compute event_in_days against -- can't be done from a relative word alone."""
+    monkeypatch.setattr(db, "today_str", lambda: "2026-09-19")
+    captured = {}
+
+    class _CapturingClient(_FakeClient):
+        def create(self, **kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return super().create(**kwargs)
+
+    fake = _CapturingClient(json.dumps(
+        {"title": "Dinner with Mel", "event_in_days": None, "event_time": None, "notes": None}
+    ))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    ai.extract_event("dinner with Mel")
+    sent_content = captured["messages"][0]["content"]
+    assert "2026-09-19" in sent_content
+    assert "Saturday" in sent_content
 
 
 # ---------- /addevent, /events ----------
