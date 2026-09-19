@@ -160,7 +160,8 @@ def test_natural_language_rundown_replies_with_synthesis(monkeypatch):
     db.add_workout(CHAT, "tennis", duration_min=60)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
         return {
             "intent": "rundown", "clarification_question": None, "casual_reply": None,
             **_no_op_extra_fields(),
@@ -180,7 +181,8 @@ def test_natural_language_rundown_logs_to_conversation_history(monkeypatch):
     db.get_or_create_user(CHAT)
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
-                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None):
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
         return {
             "intent": "rundown", "clarification_question": None, "casual_reply": None,
             **_no_op_extra_fields(),

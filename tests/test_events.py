@@ -245,7 +245,7 @@ def test_correction_can_clear_an_event_by_domain(monkeypatch):
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
             "correction_action": "delete", "days_ago": None,
@@ -265,7 +265,7 @@ def test_undo_reverts_an_event_correction_deletion(monkeypatch):
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
             "correction_action": "delete", "days_ago": None,
@@ -292,7 +292,7 @@ def test_event_correction_with_unmatched_id_says_not_sure(monkeypatch):
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "correction", "target_domain": "event", "target_expense_id": 9999,
             "correction_action": "delete", "days_ago": None,
@@ -317,7 +317,7 @@ def test_event_correction_rejects_unsupported_reschedule_action(monkeypatch):
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
             "correction_action": "edit_date", "days_ago": 0,
@@ -352,7 +352,7 @@ def test_natural_language_add_single_event_computes_date_deterministically(monke
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "add_event",
             "events": [{"event_title": "Dinner with Mel", "event_in_days": 6, "event_time": None,
@@ -373,7 +373,7 @@ def test_natural_language_add_event_with_no_events_asks_instead_of_guessing(monk
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {"intent": "add_event", "events": [], "clarification_question": None, "casual_reply": None}
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
@@ -395,7 +395,7 @@ def test_natural_language_add_a_weeks_worth_of_events_logs_every_one(monkeypatch
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {
             "intent": "add_event",
             "events": [{"event_title": t, "event_in_days": n, "event_time": None, "event_notes": None}
@@ -421,7 +421,7 @@ def test_natural_language_show_events(monkeypatch):
 
     def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
                             recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
-                            recent_events=None):
+                            recent_events=None, recent_lifts=None):
         return {"intent": "show_events", "clarification_question": None, "casual_reply": None}
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)

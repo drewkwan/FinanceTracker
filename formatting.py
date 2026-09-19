@@ -67,6 +67,25 @@ def _workout_line(row: dict) -> str:
     return f"#{row['id']} {row.get('activity') or 'workout'}{detail}{notes} ({row['workout_date']})"
 
 
+def _set_str(s: dict) -> str:
+    reps, load = s.get("reps"), s.get("load")
+    if load and reps is not None:
+        return f"{load} x{reps}"
+    if load:
+        return str(load)
+    if reps is not None:
+        return str(reps)
+    return "?"
+
+
+def _lift_line(row: dict) -> str:
+    sets_str = ", ".join(_set_str(s) for s in (row.get("sets") or [])) or "no sets recorded"
+    location_tag = f" @ {row['location']}" if row.get("location") else ""
+    effort_tag = f" ({row['effort']})" if row.get("effort") else ""
+    notes_tag = f" -- {row['context_notes']}" if row.get("context_notes") else ""
+    return f"#{row['id']} {row['exercise']}{location_tag}: {sets_str}{effort_tag}{notes_tag} ({row['lift_date']})"
+
+
 def _vitals_line(row: dict) -> str:
     bits = []
     if row.get("weight_kg") is not None:

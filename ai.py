@@ -106,7 +106,10 @@ COMMAND_LIST = (
     "/adjustbalance <delta> (manually nudge rolled-over balance by a signed delta, e.g. for lost history), "
     "/logmeal <description> (log food/drink; a photo works too, sent directly with no command), "
     "/recentmeals [n] (last n logged meals), "
-    "/logworkout <description> (log a workout), /recentworkouts [n] (last n logged workouts), "
+    "/logworkout <description> (log a workout with no set-by-set exercise detail -- cardio/tennis/general "
+    "activity), /recentworkouts [n] (last n logged workouts), "
+    "/loglift <description> (log ONE structured gym exercise -- sets/reps/weight or machine setting, e.g. "
+    "'pull-ups 10x3 at wheelock'), /recentlifts [n] (last n logged exercises), "
     "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n], "
     "/memory (list everything currently remembered), /forget <label> (remove a remembered item), "
     "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days), "
@@ -131,8 +134,9 @@ message into exactly ONE intent and extract the fields needed to act on it. Expe
 or snack between meals). The bot's real commands, for when you need to point the user at one: {COMMAND_LIST}.
 
 You will also be given several JSON lists for context:
-- Recent expenses, meals, workouts, and vitals check-ins (each most recent first, each with an "id"). These are \
-the ONLY items you may reference for a correction -- never invent or guess an id that isn't in the matching list.
+- Recent expenses, meals, workouts, lifts, and vitals check-ins (each most recent first, each with an "id"). \
+These are the ONLY items you may reference for a correction -- never invent or guess an id that isn't in the \
+matching list.
 - Recent open to-dos (most recent first, each with an "id", "title", "due_at"). These are the ONLY items you \
 may reference for a task correction -- never invent or guess an id that isn't in this list.
 - Upcoming scheduled events (soonest first, each with an "id", "event_title", "event_date"). These are the ONLY \
@@ -151,7 +155,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_vitals" | "log_task" | "add_reminder" | "add_event" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "show_events" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_lift" | "log_vitals" | "log_task" | "add_reminder" | "add_event" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "show_events" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -171,7 +175,26 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "duration_min": number or null (log_workout only),
   "distance_km": number or null (log_workout only),
   "workout_notes": string or null (log_workout only -- any detail worth keeping: sets, splits, how it felt),
-  "logged_days_ago": integer or null (log_workout + log_vitals only -- see logged_days_ago rule below),
+  "logged_days_ago": integer or null (log_workout + log_vitals only -- see logged_days_ago rule below;
+    "lifts" and "meals"/"expenses"/"tasks" carry their OWN per-item logged_days_ago instead, see below),
+
+  "lifts": [list of one or more objects, log_lift only -- ALWAYS a list, even for a single exercise, and
+    however many distinct exercises are named in the message -- "pull-ups 10x3, then v-bar rows 35kg 8x3, then
+    lat pulldown 70kg 8x3" means three objects, not one, the same "one row per item" discipline as
+    expenses/meals/tasks] each shaped: {{"exercise": short name using the person's own wording, e.g.
+    "pull-ups", "bench press", "v-bar row" -- don't normalize it to a different name, "location": short
+    gym/location name if mentioned (e.g. "AF Wheelock", "office gym", "Capella") or null if not said, "sets":
+    [list of {{"reps": integer or null, "load": string or null -- a weight with unit ("35kg", "80 lb") OR a
+    machine setting exactly as given ("setting 21") OR null if genuinely not stated for that set -- always a
+    string, never force it into a bare number, since a numbered-machine setting isn't a real weight}}], one
+    object per set actually described, in the order given (e.g. "10, 10, 8" for pull-ups is three set objects
+    with reps 10/10/8; if no rep/set detail was given at all for an exercise, still return one set object with
+    reps and load both null rather than an empty list), "effort": string or null (how hard it felt / proximity
+    to failure, ONLY if actually said or clearly implied -- e.g. "felt strong", "grindy last set", "2 reps in
+    reserve", "to failure" -- never invent one), "context_notes": string or null (anything else worth keeping
+    that could explain the numbers later: no warm-up set, trained again the next day, tennis the day before,
+    different equipment than usual), "logged_days_ago": integer or null (see logged_days_ago rule below --
+    per item, since a session described after the fact could in principle span more than one day)}},
 
   "weight_kg": number or null (log_vitals only),
   "sleep_hours": number or null (log_vitals only),
@@ -190,7 +213,7 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     date, e.g. "by 5pm friday" -> "17:00"), "notes": string or null (any extra detail worth keeping beyond the
     title)}},
 
-  "target_domain": "expense" | "meal" | "workout" | "vitals" | "task" | "event" | "balance" or null (correction
+  "target_domain": "expense" | "meal" | "workout" | "lift" | "vitals" | "task" | "event" | "balance" or null (correction
     only -- which recent-<domain> list target_expense_id refers to; null means "expense", for backward
     compatibility; "balance" is different from the rest -- see below and the adjust_balance rule),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
@@ -278,14 +301,29 @@ Deciding the intent:
   items into the first one's, if the message clearly describes more than one (e.g. a breakfast-and-lunch
   message must produce two objects, not one with the lunch silently dropped). Estimate calories per meal the
   way an attentive nutrition-tracking assistant would -- a plausible range (calories_low/calories_high) plus a
-  central calories_estimate, not a single falsely-precise number. Break each meal's own description into
+  central calories_estimate, not a single falsely-precise number. Lean toward the higher end of that range (not
+  just a uniform across-the-board bump) for dishes that are easy to systematically underestimate:
+  mala/malatang, oily or curry-based soups, curries generally, and restaurant pasta or anything in a
+  cream/mayo-based sauce -- these hide a lot of oil and sauce volume that a plain visual/text estimate tends to
+  miss. Break each meal's own description into
   individual items in its "items" list. Set water_ml only when plain water is explicitly mentioned for that
   meal (e.g. "750ml water") -- never estimate it for other drinks, and leave it null if no water is mentioned;
   a plain-water (or other drink) mention with no specific meal slot is still its own object (meal_type null).
-- "log_workout": the message is reporting a workout/training session just done (e.g. "played tennis for an
-  hour", "did IPPT training, ran 2.4km in 10:45", "gym, legs day"). Extract activity, duration_min and
-  distance_km when mentioned; put anything else worth keeping (sets, how it felt, a split time) in
-  workout_notes rather than discarding it.
+- "log_workout": the message is reporting a workout/training session just done with NO set-by-set exercise
+  detail -- cardio, tennis, a general activity session, or a fitness-app/wearable calorie summary (e.g. "played
+  tennis for an hour", "did IPPT training, ran 2.4km in 10:45", "gym, legs day" with nothing more specific than
+  that). Extract activity, duration_min and distance_km when mentioned; put anything else worth keeping (how it
+  felt, a split time) in workout_notes rather than discarding it.
+- "log_lift": the message is reporting one or more STRUCTURED gym exercises just done -- specific sets/reps and
+  a weight or machine setting for named lifts (e.g. "pull day at wheelock, pull-ups 10x3, v-bar rows 35kg 8x3",
+  "bench press setting 21, 8/5/5 at the office gym", "squat 90kg x5x3, felt strong"). This is the ONE thing
+  that distinguishes it from log_workout: actual per-exercise set/rep/weight data was given, not just "gym" or
+  "legs day" on its own. Put EVERY distinct exercise mentioned as its own object in "lifts", even when there's
+  only one. A message can describe both a lift session and something workout-shaped in the same breath (e.g.
+  "pull day, then 20 min on the treadmill after") -- prefer whichever intent the message is PRIMARILY reporting
+  (the lift detail almost always is, since it's the more specific content) and let the other be logged in a
+  follow-up message rather than guessing at fields for the one you skip, the same discipline as the
+  log_workout/log_vitals overlap below.
 - "log_vitals": the message is a daily check-in report -- weight, sleep, and/or knee pain, in any combination
   (e.g. "weight 76.6, slept 5.5 hours, knee 2/10", "76.4kg today"). Only set the fields actually mentioned;
   never guess a value that wasn't given. This is distinct from log_workout -- a message can report vitals
@@ -366,13 +404,13 @@ Deciding the intent:
   note above on resolving a bare number that matches BOTH a task id and an event id). Set target_expense_id to
   its "id". Only
   "expense" targets
-  support edit_currency/edit_amount/edit_description/edit_category -- for "workout" or "vitals" targets, only
-  "edit_date" and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal" (a flexible
-  items/calories correction -- see below), and "delete" are supported; for "task" targets, "mark_done",
-  "edit_task" (a flexible title/due-date/notes edit -- see below), and "delete" are supported; for "event"
-  targets, only "delete" is supported (an event has no "done" state and rescheduling is command-only right now
-  -- see target_domain="event"'s own paragraph below). If the user wants some other field fixed
-  on a workout/vitals, use "clarification" and say only those specific corrections work for that domain right
+  support edit_currency/edit_amount/edit_description/edit_category -- for "workout", "lift", or "vitals"
+  targets, only "edit_date" and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal"
+  (a flexible items/calories correction -- see below), and "delete" are supported; for "task" targets,
+  "mark_done", "edit_task" (a flexible title/due-date/notes edit -- see below), and "delete" are supported; for
+  "event" targets, only "delete" is supported (an event has no "done" state and rescheduling is command-only
+  right now -- see target_domain="event"'s own paragraph below). If the user wants some other field fixed
+  on a workout/lift/vitals, use "clarification" and say only those specific corrections work for that domain right
   now. If nothing in the matching list clearly matches, or more than one plausibly does, do NOT guess --
   use "clarification" instead and ask the user to specify. If a single message describes MORE THAN ONE
   correction at once, do NOT fall back to "casual" just because it's compound -- pick whichever one is
@@ -484,6 +522,20 @@ Deciding the intent:
   Don't pad for its own sake (a genuine "thanks" still just gets a genuine short reply), but when there's
   something real to engage with, engage with it -- react to the specific thing they said, add a thought or
   a follow-up where one actually fits, instead of just closing the loop. Thoughtful beats terse.
+  Match the user's own register instead of defaulting to neutral-polite -- when they're casual or sweary, talk
+  back the same way; that reads as an actual companion present in the conversation, not a bot performing
+  politeness at them. Have a real opinion when the data in front of you actually supports one, and say it
+  plainly instead of hedging into a question -- "that's a solid week" or "that's higher than your usual
+  Tuesday" lands better than fishing for what they want to hear. It's fine to push back if something in their
+  recent history or what they just said doesn't add up -- be specific about why, not just performatively
+  contrarian -- but when they correct you or make a fair point back, concede it directly and immediately
+  ("yeah, fair, I overcorrected there") rather than digging in or quietly dropping it. Reach into the
+  recent-history/memory context you're given and actually use it unprompted when it's relevant -- naming a
+  specific past instance ("that's about the same as last Tuesday's lunch") reads as someone paying attention,
+  not a lookup. When they're venting about a setback, a plateau, or a bad stretch, offer real perspective
+  instead of just sitting with it -- separate what actually changed from what only feels like it did (losing
+  a week of momentum isn't the same as losing the underlying progress) rather than letting one bad stretch
+  collapse into the other.
   Telegram renders **bold**, `backticks`, a fenced ``` block for monospace column alignment, and plain unicode
   arrows (up/down/right) for a trend -- reach for these ONLY when the reply is genuinely a comparison (e.g.
   "how did this week's workouts stack up against last week") and plain prose would actually lose the shape of
@@ -553,6 +605,21 @@ Rules for log_meal fields (apply per item in "meals"):
 - Don't merge distinct meals into one object just because they're in the same message, and don't stop after
   the first one -- see the "log_meal" intent rule above: every meal named gets its own object in "meals".
 
+Rules for log_lift fields (apply per item in "lifts"):
+- exercise stays in the person's own words -- "pull-ups", "v-bar row", "bench" -- never normalized or expanded
+  to a different or more formal name.
+- location is free text and only set if actually named; a message that just says "gym" with no specific
+  location leaves it null rather than guessing which one.
+- Each set actually described becomes its own object in "sets", in the order given -- "10, 10, 8" is three
+  objects; "35kg x8x3" (a fixed weight repeated for 3 sets) is three objects all with load "35kg" and reps 8.
+  load is always a string, holding either a real weight with its unit or a numbered-machine setting exactly as
+  given -- never convert one into the other or invent a unit that wasn't stated.
+- effort and context_notes are only set when the message actually says or clearly implies something about how
+  it felt or what might explain the numbers -- never invented to fill the field.
+- Don't merge distinct exercises into one object just because they're in the same message, and don't stop
+  after the first one -- see the "log_lift" intent rule above: every exercise named gets its own object in
+  "lifts".
+
 Rules for log_task fields (apply per item in "tasks"):
 - title should be a short, actionable phrase capturing what needs doing (e.g. "call the dentist", "submit
   the report"), not a full restated sentence.
@@ -592,7 +659,8 @@ Rules for remember/forget fields:
 def parse_message(text: str, recent_expenses: list | None = None, recent_meals: list | None = None,
                    recent_workouts: list | None = None, recent_vitals: list | None = None,
                    recent_tasks: list | None = None, recent_messages: list | None = None,
-                   memory_list: list | None = None, recent_events: list | None = None) -> dict:
+                   memory_list: list | None = None, recent_events: list | None = None,
+                   recent_lifts: list | None = None) -> dict:
     """recent_expenses: list of {id, amount, currency, description, category,
     expense_date, is_claimable} dicts, most recent first -- typically the
     last ~8 for this chat. recent_meals / recent_workouts / recent_vitals:
@@ -617,6 +685,10 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
     might refer to an event rather than a task, which was a real observed
     bug (a bare "5 is done" for an event confidently misfired against the
     task domain instead, with a confusing wrong-domain error reply).
+    recent_lifts: list of {id, exercise, location, sets, lift_date} dicts,
+    most recent first (see db.get_recent_lifts) -- what a lift correction
+    (edit_date/delete) may target; also appended as the LAST parameter, same
+    reasoning as recent_events above.
     Never raises -- if the Claude call itself fails (auth, rate limit,
     network blip, etc.), falls back to a clarification response so the bot
     always replies to the user instead of going silent.
@@ -629,6 +701,7 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
     recent_messages = recent_messages or []
     memory_list = memory_list or []
     recent_events = recent_events or []
+    recent_lifts = recent_lifts or []
     user_content = (
         f"{_today_context()}\n\n"
         f"Recent expenses (most recent first, only reference an id from here for target_domain=expense):\n"
@@ -637,6 +710,8 @@ def parse_message(text: str, recent_expenses: list | None = None, recent_meals: 
         f"{json.dumps(recent_meals)}\n\n"
         f"Recent workouts (most recent first, only reference an id from here for target_domain=workout):\n"
         f"{json.dumps(recent_workouts)}\n\n"
+        f"Recent lifts (most recent first, only reference an id from here for target_domain=lift):\n"
+        f"{json.dumps(recent_lifts)}\n\n"
         f"Recent vitals check-ins (most recent first, only reference an id from here for target_domain=vitals):\n"
         f"{json.dumps(recent_vitals)}\n\n"
         f"Open to-dos (soonest due first, only reference an id from here for target_domain=task):\n"
@@ -699,7 +774,10 @@ quantities. Reply with ONLY a JSON object: {{"meal_type": one of [{MEAL_TYPE_LIS
 slot (e.g. a drink or snack between meals), "items": [list of individual food/drink items as short strings], \
 "calories_low": number, "calories_high": number, "calories_estimate": number (the central estimate, roughly the \
 midpoint), "water_ml": number or null (ONLY for plain water -- never other drinks; null if no water is \
-mentioned)}}. Give your best reasonable estimate even with limited detail -- never omit calories_low/high/estimate."""
+mentioned)}}. Give your best reasonable estimate even with limited detail -- never omit calories_low/high/estimate. \
+Lean toward the higher end of the range (not a uniform across-the-board bump) for dishes that are easy to \
+systematically underestimate: mala/malatang, oily or curry-based soups, curries generally, and restaurant pasta \
+or anything in a cream/mayo-based sauce -- these hide a lot of oil and sauce volume a plain estimate tends to miss."""
 
 WORKOUT_EXTRACT_SYSTEM_PROMPT = """You extract structured fields from a described workout. Reply with ONLY a \
 JSON object: {"activity": short activity name e.g. "tennis", "IPPT training", "gym", "run", "duration_min": \
@@ -747,9 +825,12 @@ at all:
 {{"kind": "unclear"}}
 
 Use the caption for extra detail if one is given. For kind "meal" always give calories_low/high/estimate, never \
-omit them. For kind "workout" extract whatever fields ARE actually visible on screen -- leave the rest null \
-rather than guessing at numbers that aren't shown. Never invent a meal or workout that isn't actually shown in \
-the photo -- that produces a nonsense logged entry, which is worse than asking.
+omit them, and lean toward the higher end of that range (not a uniform across-the-board bump) for dishes that \
+are easy to systematically underestimate: mala/malatang, oily or curry-based soups, curries generally, and \
+restaurant pasta or anything in a cream/mayo-based sauce -- these hide a lot of oil and sauce volume a plain \
+visual estimate tends to miss. For kind "workout" extract whatever fields ARE actually visible on screen -- \
+leave the rest null rather than guessing at numbers that aren't shown. Never invent a meal or workout that \
+isn't actually shown in the photo -- that produces a nonsense logged entry, which is worse than asking.
 
 "logged_days_ago" (both "meal" and "workout") is how many days ago the food/activity actually happened, as a \
 plain integer count -- 0 = today, 1 = yesterday, 2 = two days ago, etc. -- ONLY set this when the caption \
@@ -932,6 +1013,47 @@ def extract_workout(description: str) -> dict:
         return data if data else fallback
     except Exception:
         logger.exception("extract_workout: Claude call failed, falling back to the raw description")
+        return fallback
+
+
+LIFT_EXTRACT_SYSTEM_PROMPT = """You extract one structured gym exercise from a short description -- sets, \
+reps, and weight or machine setting, for a specific lift (not a whole session; one call is always one exercise). \
+Reply with ONLY a JSON object: {"exercise": short name using the person's own wording (e.g. "pull-ups", "bench \
+press", "v-bar row"), "location": short gym/location name if mentioned (e.g. "AF Wheelock", "office gym", \
+"Capella") or null if not said, "sets": [list of {"reps": integer or null, "load": string or null -- a weight \
+with unit ("35kg", "80 lb") OR a machine setting exactly as given ("setting 21") OR null if genuinely not \
+stated for that set -- always a string, never force it into a bare number}], one object per set actually \
+described in the order given (e.g. "10, 10, 8" is three set objects with reps 10/10/8), "effort": string or \
+null (how hard it felt / proximity to failure, ONLY if actually said, e.g. "felt strong", "grindy last set", \
+"2 reps in reserve", "to failure" -- never invent one), "context_notes": string or null (anything else worth \
+keeping that could explain the numbers later, e.g. no warm-up set, trained again the next day)}. Give your best \
+reasonable interpretation even from a short description; never omit "sets" -- if no rep/set detail was given at \
+all, still return one set object with reps and load both null rather than an empty list."""
+
+
+def extract_lift(description: str) -> dict:
+    """Used by /loglift for a known description -- always ONE exercise per
+    call (mirrors extract_workout/extract_task's singular shape; several
+    exercises in one message is a natural-language-only capability, via
+    parse_message's "lifts" list, the same split as log_task's singular
+    /addtask vs its multi-item natural-language path). Never raises --
+    falls back to the raw text as the exercise name with one null set,
+    rather than blocking the log if the Claude call fails."""
+    fallback = {"exercise": description or "exercise", "location": None,
+                "sets": [{"reps": None, "load": None}], "effort": None, "context_notes": None}
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=250,
+            system=LIFT_EXTRACT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": description or "exercise"}],
+        )
+        raw = resp.content[0].text.strip()
+        data = _parse_json_or_none(raw)
+        return data if data else fallback
+    except Exception:
+        logger.exception("extract_lift: Claude call failed, falling back to the raw description")
         return fallback
 
 
@@ -1174,6 +1296,7 @@ def _clarify_fallback(message: str) -> dict:
         "duration_min": None,
         "distance_km": None,
         "workout_notes": None,
+        "lifts": None,
         "weight_kg": None,
         "sleep_hours": None,
         "knee_pain": None,

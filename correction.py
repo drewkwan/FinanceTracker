@@ -33,6 +33,7 @@ import db
 import fx
 from formatting import (
     _event_line,
+    _lift_line,
     _meal_line,
     _memory_line,
     _money,
@@ -95,6 +96,10 @@ _DOMAIN_OPS = {
                  "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                  "get": db.get_workout, "edit_date": db.edit_workout_date, "delete": db.delete_workout,
                  "restore": db.restore_deleted_workout, "line": _workout_line},
+    "lift": {"noun": "lift", "recent_cmd": "/recentlifts", "date_field": "lift_date",
+              "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
+              "get": db.get_lift, "edit_date": db.edit_lift_date, "delete": db.delete_lift,
+              "restore": db.restore_deleted_lift, "line": _lift_line},
     "vitals": {"noun": "check-in", "recent_cmd": "/recentvitals", "date_field": "vitals_date",
                 "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                 "get": db.get_vitals, "edit_date": db.edit_vitals_date, "delete": db.delete_vitals,
@@ -324,13 +329,14 @@ async def _handle_balance_adjustment(update: Update, context: ContextTypes.DEFAU
 async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: dict,
                               recent_ids: set, recent_meal_ids: set = frozenset(),
                               recent_workout_ids: set = frozenset(), recent_vitals_ids: set = frozenset(),
-                              recent_task_ids: set = frozenset(), recent_event_ids: set = frozenset()):
+                              recent_task_ids: set = frozenset(), recent_event_ids: set = frozenset(),
+                              recent_lift_ids: set = frozenset()):
     """Applies a correction the AI identified against one of the chat's
-    recent expenses/meals/workouts/vitals/tasks/events. Every confirmation
-    message here is built from real values just read back from the
-    database -- never from AI-generated text -- so the bot can never claim
-    to have made a change it didn't actually make (the exact failure mode
-    that prompted this feature)."""
+    recent expenses/meals/workouts/lifts/vitals/tasks/events. Every
+    confirmation message here is built from real values just read back from
+    the database -- never from AI-generated text -- so the bot can never
+    claim to have made a change it didn't actually make (the exact failure
+    mode that prompted this feature)."""
     chat_id = update.effective_chat.id
     target_id = parsed.get("target_expense_id")
     action = parsed.get("correction_action")
@@ -341,6 +347,9 @@ async def _handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if domain == "workout":
         await _handle_simple_domain_correction(update, context, parsed, "workout", recent_workout_ids)
+        return
+    if domain == "lift":
+        await _handle_simple_domain_correction(update, context, parsed, "lift", recent_lift_ids)
         return
     if domain == "vitals":
         await _handle_simple_domain_correction(update, context, parsed, "vitals", recent_vitals_ids)

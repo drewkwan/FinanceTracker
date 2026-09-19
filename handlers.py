@@ -21,6 +21,7 @@ from correction import CORRECTION_UNDO_PHRASES, LAST_CORRECTION_KEY, _handle_cor
 from finance import _balance_text, _recent_text
 from fitness import _force_log_workout_and_reply
 from formatting import _money, _status_text, _workout_line
+from lifts import _log_lifts_and_reply, _recent_lifts_for_ai
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply, _target_date_from_days_ago
 from events import _add_events_and_reply, _events_text
@@ -144,6 +145,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_task_ids = {r["id"] for r in recent_tasks}
     recent_events = _recent_events_for_ai(chat_id)
     recent_event_ids = {r["id"] for r in recent_events}
+    recent_lifts = _recent_lifts_for_ai(chat_id)
+    recent_lift_ids = {r["id"] for r in recent_lifts}
     # The message just added above is deliberately included here -- the
     # model should see its own current turn as part of the running thread,
     # not just what came before it.
@@ -154,11 +157,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # We asked a clarifying question; treat this message as the answer.
         merged_text = f"{pending['original']}\n(Additional info: {text})"
         parsed = ai.parse_message(merged_text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_tasks, recent_messages, memory_list, recent_events)
+                                   recent_tasks, recent_messages, memory_list, recent_events, recent_lifts)
     else:
         merged_text = text
         parsed = ai.parse_message(text, recent_expenses, recent_meals, recent_workouts, recent_vitals,
-                                   recent_tasks, recent_messages, memory_list, recent_events)
+                                   recent_tasks, recent_messages, memory_list, recent_events, recent_lifts)
 
     intent = parsed.get("intent")
 
@@ -183,12 +186,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # right values against a recent-id set that didn't contain them).
         logger.info(
             "correction parsed: chat_id=%s text=%r target_domain=%r target_expense_id=%r "
-            "correction_action=%r recent_task_ids=%s recent_event_ids=%s",
+            "correction_action=%r recent_task_ids=%s recent_event_ids=%s recent_lift_ids=%s",
             chat_id, merged_text, parsed.get("target_domain"), parsed.get("target_expense_id"),
             parsed.get("correction_action"), sorted(recent_task_ids), sorted(recent_event_ids),
+            sorted(recent_lift_ids),
         )
         await _handle_correction(update, context, parsed, recent_ids, recent_meal_ids,
-                                  recent_workout_ids, recent_vitals_ids, recent_task_ids, recent_event_ids)
+                                  recent_workout_ids, recent_vitals_ids, recent_task_ids, recent_event_ids,
+                                  recent_lift_ids)
         return
 
     if intent == "show_balance":
@@ -231,6 +236,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      workout_date=workout_date)
         row = db.get_workout(chat_id, workout_id)
         await _reply(update, chat_id, f"Logged: {_workout_line(row)}")
+        return
+
+    if intent == "log_lift":
+        context.chat_data.pop(PENDING_KEY, None)
+        lifts = parsed.get("lifts") or []
+        if not lifts:
+            await _reply(update, chat_id, "I didn't catch the exercise -- try describing it again.")
+            return
+        await _log_lifts_and_reply(update, chat_id, lifts)
         return
 
     if intent == "log_vitals":

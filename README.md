@@ -168,6 +168,42 @@ natural-language pattern.
   deleting the whole entry to fix one wrong item was real, reported
   friction.
 
+## How structured lift logging works
+
+- **Lifts are logged per exercise, not per session.** `workouts` stays a
+  single free-text blob per session (cardio, tennis, a fitness-app
+  daily-activity summary) — a gym day with actual sets/reps/weight data goes
+  through a separate `lifts` domain instead, one row per exercise: "pull-ups
+  10x3, then v-bar rows 35kg 8x3, then lat pulldown 70kg 8x3" in one message
+  logs three rows, the same "one row per item" discipline as meals/tasks.
+  Morrow decides which domain a message belongs to based on whether real
+  set/rep/weight detail was actually given — "gym, legs day" on its own
+  stays a `log_workout`; "squat 90kg x5x3, felt strong" is a `log_lift`.
+- **Each exercise carries its own location** (e.g. "AF Wheelock", "office
+  gym", "Capella"), kept as free text rather than a fixed list — your gym
+  vocabulary shifts over time, and different locations/machines aren't
+  directly comparable numbers anyway.
+- **A set's load is always a string, never forced into a number** — a real
+  weight with its unit ("35kg") and a numbered-machine setting ("setting
+  21") are both valid loads, and conflating them into one unit would be
+  actively wrong for an uncalibrated machine.
+- **Effort and context notes are free text, only set when actually said** —
+  "felt strong", "grindy last set", "no warm-up set", "trained again the
+  next day" — the kind of detail that matters when comparing a session to a
+  future one, captured rather than discarded.
+- `/loglift <description>` logs one exercise by command (e.g. `/loglift
+  bench press 80kg 4x3 at biopolis`); `/recentlifts [n]` lists recent ones.
+  Corrections work the same narrow way as workouts/vitals — moving the date
+  or deleting one, with one-word `undo` — via natural language.
+- **This is Phase A of a larger coaching-engine plan, not the whole
+  thing.** Nothing reads this data to give a verdict, compare it against a
+  progression target, or prescribe next-session numbers yet — right now
+  it's purely about getting real per-(exercise, location) data flowing into
+  structured rows instead of vanishing into `workouts.activity` free text.
+  The coaching layer (comparing a set against history, a next-target table,
+  a maintenance-vs-progression mode) is a deliberately separate, later
+  phase — see the project's coaching-engine planning notes.
+
 ## How memory works
 
 Morrow keeps two separate, deliberately different kinds of memory (see

@@ -206,6 +206,19 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                exercise TEXT NOT NULL,
+                location TEXT,
+                sets TEXT,
+                effort TEXT,
+                context_notes TEXT,
+                lift_date TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         # Forward-compatible migration in case this is an existing db from
         # before currency/streak/alert support was added.
         _add_column_if_missing(conn, "users", "last_alert_date", "last_alert_date TEXT")
@@ -924,6 +937,100 @@ def get_daily_workout_totals(chat_id: int, day_str: str) -> dict:
             (chat_id, day_str),
         ).fetchone()
         return {"calories_burned": row["calories_burned"]}
+
+
+# ---------- lifts ----------
+# Structured gym-exercise logging -- deliberately separate from workouts,
+# which stays a single free-text blob per session (cardio, tennis, a
+# fitness-app daily-activity summary). A lift row is one EXERCISE within a
+# session, not one session -- a single gym day producing "pull-ups 10x3,
+# v-bar rows 35kg 8x3, lat pulldown 70kg 8x3" is three rows, the same "one
+# row per item, not one per message" discipline as meals. This is Phase A
+# of the coaching-engine work: just getting real per-(exercise, location)
+# data flowing into structured rows instead of vanishing into a free-text
+# activity string -- no progression/target logic reads this yet.
+
+def _lift_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        d["sets"] = json.loads(d["sets"]) if d["sets"] else []
+    except (TypeError, json.JSONDecodeError):
+        d["sets"] = []
+    return d
+
+
+def add_lift(chat_id: int, exercise: str, location: str | None, sets: list[dict] | None,
+             effort: str | None = None, context_notes: str | None = None,
+             lift_date: str | None = None) -> int:
+    """sets: list of {"reps": int|None, "load": str|None} dicts, one per set
+    actually described, in the order given -- "load" is always a string
+    (never forced into a number) since a numbered-machine setting ("setting
+    21") is just as valid a load as a real weight ("35kg"). lift_date
+    defaults to today -- pass it explicitly only when the caller already
+    computed a real backdated date deterministically, same discipline as
+    add_meal/add_workout's own docstrings."""
+    get_or_create_user(chat_id)
+    sets_json = json.dumps(sets or [])
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO lifts (chat_id, exercise, location, sets, effort, context_notes, lift_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, exercise, location, sets_json, effort, context_notes, lift_date or today_str()),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def get_recent_lifts(chat_id: int, limit: int = 10) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM lifts WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [_lift_row(r) for r in rows]
+
+
+def get_lift(chat_id: int, lift_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM lifts WHERE id = ? AND chat_id = ?", (lift_id, chat_id)
+        ).fetchone()
+        return _lift_row(row) if row else None
+
+
+def edit_lift_date(chat_id: int, lift_id: int, new_date_str: str) -> dict | None:
+    row = get_lift(chat_id, lift_id)
+    if row is None:
+        return None
+    today = today_str()
+    if new_date_str > today:
+        new_date_str = today
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE lifts SET lift_date = ? WHERE id = ? AND chat_id = ?",
+            (new_date_str, lift_id, chat_id),
+        )
+    return get_lift(chat_id, lift_id)
+
+
+def delete_lift(chat_id: int, lift_id: int) -> dict | None:
+    row = get_lift(chat_id, lift_id)
+    if row is None:
+        return None
+    with get_conn() as conn:
+        conn.execute("DELETE FROM lifts WHERE id = ? AND chat_id = ?", (lift_id, chat_id))
+    return row
+
+
+def restore_deleted_lift(chat_id: int, row: dict) -> dict | None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO lifts (chat_id, exercise, location, sets, effort, context_notes, lift_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, row["exercise"], row["location"], json.dumps(row.get("sets") or []),
+             row.get("effort"), row.get("context_notes"), row["lift_date"]),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return get_lift(chat_id, new_id)
 
 
 # ---------- vitals ----------

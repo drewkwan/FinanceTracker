@@ -44,6 +44,7 @@ from events import addevent_cmd, events_cmd, removeevent_cmd, rescheduleevent_cm
 from fitness import logworkout_cmd, recentworkouts
 from formatting import _money, _status_text
 from handlers import handle_text, on_error
+from lifts import loglift_cmd, recentlifts
 from memory import forget_cmd, memory_cmd
 from morning import morning_briefing_tick, morning_cmd
 from nutrition import handle_photo, logmeal_cmd, recentmeals
@@ -101,6 +102,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "See recent meals: /recentmeals\n"
         "Log a workout: /logworkout tennis for an hour\n"
         "See recent workouts: /recentworkouts\n"
+        "Log a structured lift: /loglift pull-ups 10x3 at wheelock\n"
+        "See recent lifts: /recentlifts\n"
         "Log vitals: /logvitals weight 76.6, slept 5.5 hours, knee 2/10\n"
         "See recent check-ins: /recentvitals\n\n"
         "See what I remember: /memory\n"
@@ -182,6 +185,8 @@ def main():
     app.add_handler(CommandHandler("recentmeals", recentmeals))
     app.add_handler(CommandHandler("logworkout", logworkout_cmd))
     app.add_handler(CommandHandler("recentworkouts", recentworkouts))
+    app.add_handler(CommandHandler("loglift", loglift_cmd))
+    app.add_handler(CommandHandler("recentlifts", recentlifts))
     app.add_handler(CommandHandler("logvitals", logvitals_cmd))
     app.add_handler(CommandHandler("recentvitals", recentvitals))
     app.add_handler(CommandHandler("memory", memory_cmd))
