@@ -863,6 +863,34 @@ def test_photo_workout_not_flagged_as_duplicate_when_calories_differ_substantial
     assert any(r.startswith("Logged") for r in update.message.replies)
 
 
+def test_find_duplicate_workout_catches_a_match_on_the_adjacent_day():
+    """Regression test for a real bad interaction: two related photos (a
+    named workout + that same day's daily-activity total) landed on
+    ADJACENT dates instead of the same one, because only one of the two
+    carried usable date context -- same-date-only matching silently missed
+    it and both got logged, doubling the day's real burn total. Checking a
+    one-day-either-side window catches this."""
+    import datetime as dt
+    db.get_or_create_user(CHAT)
+    yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    db.add_workout(CHAT, "daily activity", calories_burned=2548, workout_date=yesterday)
+    match = bot._find_duplicate_workout(CHAT, dt.date.today().isoformat(), 2548)
+    assert match is not None
+    assert match["workout_date"] == yesterday
+
+
+def test_find_duplicate_workout_does_not_reach_two_days_out():
+    """The widened window is deliberately narrow (one day either side, not
+    unbounded) -- a match two days away is far enough that it's more
+    likely a real coincidence than the same mis-dated data."""
+    import datetime as dt
+    db.get_or_create_user(CHAT)
+    two_days_ago = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    db.add_workout(CHAT, "daily activity", calories_burned=2548, workout_date=two_days_ago)
+    match = bot._find_duplicate_workout(CHAT, dt.date.today().isoformat(), 2548)
+    assert match is None
+
+
 # ---------- backdating a photo log from its caption's date (logged_days_ago) ----------
 
 def test_target_date_from_days_ago_caps_and_handles_none():

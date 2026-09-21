@@ -228,3 +228,189 @@ def test_rundown_falls_back_to_raw_breakdown_when_synthesis_fails(monkeypatch):
     reply = update.message.replies[-1]
     assert "Balance" in reply
     assert "tennis" in reply
+
+
+# ---------- rundown.py: _resolve_day ----------
+
+def test_resolve_day_none_or_zero_means_today():
+    assert bot._resolve_day(None) == db.today_str()
+    assert bot._resolve_day(0) == db.today_str()
+
+
+def test_resolve_day_counts_back_from_today():
+    assert bot._resolve_day(1) == _days_ago(1)
+
+
+def test_resolve_day_clamps_to_two_weeks():
+    assert bot._resolve_day(999) == _days_ago(14)
+
+
+# ---------- rundown.py: _day_stats_payload ----------
+
+def test_day_stats_payload_computes_real_figures_for_one_day():
+    db.get_or_create_user(CHAT)
+    yesterday = _days_ago(1)
+    db.add_meal(CHAT, "lunch", ["mango", "rice"], 400, 600, 500, meal_date=yesterday)
+    db.add_workout(CHAT, "tennis", calories_burned=800, workout_date=yesterday)
+    db.add_vitals(CHAT, weight_kg=76.1, vitals_date=yesterday)
+    # A meal logged TODAY shouldn't leak into yesterday's payload.
+    db.add_meal(CHAT, "dinner", ["noodles"], 300, 500, 400)
+
+    payload = bot._day_stats_payload(CHAT, yesterday)
+    assert payload["day"] == yesterday
+    assert payload["is_today"] is False
+    assert payload["meals"]["count"] == 1
+    assert payload["meals"]["items"] == ["mango", "rice"]
+    assert payload["meals"]["total_calories_estimate"] == 500
+    assert payload["workouts"]["total_calories_burned"] == 800
+    assert payload["net_calories"] == -300  # 500 in - 800 out
+    assert payload["vitals"]["weight_kg"] == 76.1
+
+
+def test_day_stats_payload_nulls_out_net_when_nothing_logged_at_all():
+    db.get_or_create_user(CHAT)
+    payload = bot._day_stats_payload(CHAT, db.today_str())
+    assert payload["meals"]["count"] == 0
+    assert payload["workouts"]["count"] == 0
+    assert payload["net_calories"] is None
+    assert payload["vitals"] is None
+
+
+def test_day_stats_payload_net_is_meaningful_with_only_one_side_logged():
+    """A day with meals but no workout burn logged shouldn't null out net --
+    it's just calories_in - 0, a real (if partial) number."""
+    db.get_or_create_user(CHAT)
+    db.add_meal(CHAT, "lunch", ["mango"], 400, 600, 500)
+    payload = bot._day_stats_payload(CHAT, db.today_str())
+    assert payload["net_calories"] == 500
+
+
+# ---------- ai.py: answer_with_day_stats ----------
+
+def test_answer_with_day_stats_returns_model_text(monkeypatch):
+    _mock_client(monkeypatch, "You ate about 500 kcal and burned 800, so a solid deficit.")
+    payload = {"day": db.today_str(), "is_today": True, "meals": {}, "workouts": {}, "net_calories": None,
+               "vitals": None}
+    text = ai.answer_with_day_stats(payload)
+    assert "deficit" in text
+
+
+def test_answer_with_day_stats_raises_on_api_failure(monkeypatch):
+    """Same division of labor as answer_with_rundown -- the reply-text
+    wrapper (not this function) is responsible for the fallback."""
+    _mock_client(monkeypatch, ConnectionError("network blip"))
+    try:
+        ai.answer_with_day_stats({"day": db.today_str()})
+        assert False, "expected the ConnectionError to propagate"
+    except ConnectionError:
+        pass
+
+
+# ---------- rundown.py: _day_stats_fallback_text ----------
+
+def test_day_stats_fallback_text_never_silent_on_empty_day():
+    db.get_or_create_user(CHAT)
+    payload = bot._day_stats_payload(CHAT, db.today_str())
+    text = bot._day_stats_fallback_text(payload)
+    assert "nothing logged" in text
+
+
+# ---------- natural-language "day_stats" intent + /daystats command ----------
+
+def _fake_parse_message_day_stats(days_ago):
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "day_stats", "clarification_question": None, "casual_reply": None,
+            "day_stats_days_ago": days_ago,
+            **_no_op_extra_fields(),
+        }
+    return fake_parse_message
+
+
+def test_natural_language_day_stats_replies_with_synthesis_for_the_right_day(monkeypatch):
+    db.get_or_create_user(CHAT)
+    yesterday = _days_ago(1)
+    db.add_meal(CHAT, "lunch", ["mala"], 900, 1200, 1050, meal_date=yesterday)
+    captured = {}
+
+    def fake_answer_with_day_stats(payload):
+        captured["payload"] = payload
+        return "Yesterday you had about 1050 kcal, mostly from the mala."
+
+    monkeypatch.setattr(bot.ai, "parse_message", _fake_parse_message_day_stats(1))
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", fake_answer_with_day_stats)
+    update = FakeUpdate(CHAT, text="stats from last night")
+    _run(bot.handle_text(update, FakeContext()))
+    assert update.message.replies[-1] == "Yesterday you had about 1050 kcal, mostly from the mala."
+    assert captured["payload"]["day"] == yesterday
+    assert captured["payload"]["meals"]["total_calories_estimate"] == 1050
+
+
+def test_natural_language_day_stats_logs_to_conversation_history(monkeypatch):
+    db.get_or_create_user(CHAT)
+
+    monkeypatch.setattr(bot.ai, "parse_message", _fake_parse_message_day_stats(0))
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", lambda payload: "Nothing logged today yet.")
+    update = FakeUpdate(CHAT, text="stats for today")
+    _run(bot.handle_text(update, FakeContext()))
+    rows = db.get_recent_messages(CHAT)
+    assert rows[-1]["role"] == "morrow"
+    assert rows[-1]["content"] == "Nothing logged today yet."
+
+
+def test_daystats_command_defaults_to_today(monkeypatch):
+    db.get_or_create_user(CHAT)
+    captured = {}
+
+    def fake_answer_with_day_stats(payload):
+        captured["payload"] = payload
+        return "Today's numbers."
+
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", fake_answer_with_day_stats)
+    update = FakeUpdate(CHAT)
+    _run(bot.daystats_cmd(update, FakeContext()))
+    assert update.message.replies[-1] == "Today's numbers."
+    assert captured["payload"]["day"] == db.today_str()
+
+
+def test_daystats_command_accepts_yesterday_and_n(monkeypatch):
+    db.get_or_create_user(CHAT)
+    captured = {}
+
+    def fake_answer_with_day_stats(payload):
+        captured.setdefault("days", []).append(payload["day"])
+        return "ok"
+
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", fake_answer_with_day_stats)
+    context1 = FakeContext()
+    context1.args = ["yesterday"]
+    _run(bot.daystats_cmd(FakeUpdate(CHAT), context1))
+    context2 = FakeContext()
+    context2.args = ["3"]
+    _run(bot.daystats_cmd(FakeUpdate(CHAT), context2))
+    assert captured["days"] == [_days_ago(1), _days_ago(3)]
+
+
+def test_daystats_command_rejects_bad_argument(monkeypatch):
+    db.get_or_create_user(CHAT)
+    update = FakeUpdate(CHAT)
+    context = FakeContext()
+    context.args = ["banana"]
+    _run(bot.daystats_cmd(update, context))
+    assert "Usage:" in update.message.replies[-1]
+
+
+def test_day_stats_falls_back_to_raw_breakdown_when_synthesis_fails(monkeypatch):
+    db.get_or_create_user(CHAT)
+    db.add_meal(CHAT, "lunch", ["mango"], 400, 600, 500)
+
+    def fake_answer_with_day_stats(payload):
+        raise ConnectionError("network blip")
+
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", fake_answer_with_day_stats)
+    update = FakeUpdate(CHAT)
+    _run(bot.daystats_cmd(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "500" in reply

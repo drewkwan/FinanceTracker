@@ -49,7 +49,8 @@ dates or reporting on state changes itself.
 import base64
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -88,6 +89,21 @@ def _today_context() -> str:
     return f"Today's actual date is {today.isoformat()} ({today.strftime('%A')})."
 
 
+def _current_local_time_str() -> str:
+    """The current wall-clock time in config.BOT_TIMEZONE, e.g. "00:04" --
+    used only by the photo-classify prompts (see PHOTO_CLASSIFY_SYSTEM_PROMPT's
+    just-after-midnight reasoning), not injected everywhere _today_context()
+    is, since nothing else currently needs it. A real observed bug this
+    supports fixing: a "daily activity" screenshot showing a full day's
+    totals (e.g. 3,168 kcal, 123 active minutes) sent a few minutes after
+    local midnight got logged onto the new day, even though it's not
+    physically possible for that much activity to have accumulated in the
+    few minutes since rollover -- the screen was still showing the day
+    that just ended. Computed fresh on every call, same reasoning as
+    _today_context."""
+    return datetime.now(ZoneInfo(config.BOT_TIMEZONE)).strftime("%H:%M")
+
+
 CATEGORY_LIST = ", ".join(config.CATEGORIES)
 CURRENCY_LIST = ", ".join(config.KNOWN_CURRENCIES)
 MEAL_TYPE_LIST = ", ".join(config.MEAL_TYPES)
@@ -113,6 +129,7 @@ COMMAND_LIST = (
     "/logvitals <weight/sleep/knee pain/notes> (log a daily check-in), /recentvitals [n], "
     "/memory (list everything currently remembered), /forget <label> (remove a remembered item), "
     "/rundown (cross-domain check-in: money + food + training + vitals together over the last 7 days), "
+    "/daystats [today|yesterday|N] (real calories in/out + activity + vitals for ONE specific day), "
     "/addtask <description> (add a to-do, e.g. 'call the dentist tomorrow 5pm'), "
     "/tasks (show the open to-do list, soonest due first), /done <id> (mark a to-do done), "
     "/addreminder <description> (add a DAILY recurring reminder, e.g. 'take hair pills' -- resurfaces every "
@@ -123,6 +140,36 @@ COMMAND_LIST = (
     "/events (show what's coming up), "
     "/rescheduleevent <id> <days from today> (move an event to a new day), "
     "/removeevent <id> (remove a scheduled event)"
+)
+
+# Shared by every calorie-estimating prompt (parse_message's log_meal rules, MEAL_ESTIMATE_SYSTEM_PROMPT,
+# PHOTO_CLASSIFY_SYSTEM_PROMPT's meal shape) so the calibration can't drift between them -- previously this
+# was three separately-maintained copies of similar-but-not-identical text, narrowly scoped to a short list of
+# named dishes (mala, curries, cream sauces). Broadened after a real observed pattern: estimates were running
+# consistently low across restaurant/hawker/cooked food generally, not just that named list -- the direction
+# of the error is structural (a visual or text description systematically under-counts cooking oil, sauce, and
+# the true size of a restaurant/hawker portion vs. a "textbook" home-cooked one), so the fix has to be a general
+# default toward the higher end of plausibility for that whole category of food, not a longer list of specific
+# dishes to special-case.
+MEAL_CALORIE_CALIBRATION_NOTE = (
+    "Calibration: the systematic error in estimating a meal's calories is almost always UNDER-counting, not "
+    "over-counting -- a description or photo makes the visible food obvious but hides how much oil, butter, "
+    "sugar, or sauce actually went into cooking or dressing it, and restaurant/hawker/delivery portions "
+    "consistently run larger than a 'standard' home-cooked serving of the same dish. So: for any meal that's "
+    "restaurant-, hawker-, or delivery-sourced, or described as fried/stir-fried/deep-fried, or in a "
+    "visible sauce/gravy/dressing (not just the specific dishes named below) -- set the WHOLE range higher "
+    "than a first instinct suggests, not just the point estimate within an already-conservative range; a "
+    "full rice/noodle hawker main course, for instance, is rarely realistically under 600kcal even when it "
+    "looks modest, once cooking oil is accounted for. Dishes that are especially easy to systematically "
+    "underestimate this way: mala/malatang, oily or curry-based soups, curries generally, restaurant pasta "
+    "or anything in a cream/mayo-based sauce, fried rice/noodles, and anything described as 'fried' -- these "
+    "hide the most oil/sauce volume relative to how light they look. A genuinely light, small, or home-"
+    "measured/packaged item (a piece of fruit, a labelled snack, an explicitly 'small portion' or 'just a "
+    "few bites') doesn't get this upward bias -- it's specifically restaurant/hawker/fried/sauced food where "
+    "the visible portion undersells the true calorie count. When genuinely torn between two plausible "
+    "estimates for food in this category, prefer the higher one: for someone tracking a calorie deficit, a "
+    "quietly under-logged meal is a worse error than a slightly generous one, since it makes the tracked "
+    "deficit look better than the real one."
 )
 
 PARSE_SYSTEM_PROMPT = f"""You are Morrow, a personal companion the user talks to over Telegram -- not just a \
@@ -155,7 +202,7 @@ source of durable facts -- never invent a plan or preference that isn't actually
 
 Respond with ONLY a JSON object, no other text, matching this shape:
 {{
-  "intent": "log_expense" | "log_meal" | "log_workout" | "log_lift" | "log_vitals" | "log_task" | "add_reminder" | "add_event" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "show_events" | "rundown" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
+  "intent": "log_expense" | "log_meal" | "log_workout" | "log_lift" | "log_vitals" | "log_task" | "add_reminder" | "add_event" | "correction" | "show_balance" | "show_recent" | "show_tasks" | "show_reminders" | "show_events" | "rundown" | "day_stats" | "remember" | "forget" | "show_memory" | "casual" | "clarification",
 
   "expenses": [list of one or more objects, log_expense only -- ALWAYS a list, even for a single purchase]
     each shaped: {{"amount": number, "currency": one of the currency list or null if not mentioned,
@@ -177,6 +224,13 @@ Respond with ONLY a JSON object, no other text, matching this shape:
   "workout_notes": string or null (log_workout only -- any detail worth keeping: sets, splits, how it felt),
   "logged_days_ago": integer or null (log_workout + log_vitals only -- see logged_days_ago rule below;
     "lifts" and "meals"/"expenses"/"tasks" carry their OWN per-item logged_days_ago instead, see below),
+
+  "day_stats_days_ago": integer or null (day_stats only -- which single day is being asked about, as a plain
+    day count: 0 = today, 1 = yesterday/last night, 2 = two days ago, etc. Same discipline as logged_days_ago
+    above -- for an explicit weekday or calendar date ("stats for Saturday", "calories for the 20th"), compute
+    the count against "Today's actual date" at the top of this message; never output an actual date yourself.
+    Default to 0 (today) if the message asks for stats but doesn't name a day at all, e.g. "how am I doing
+    today calorie-wise"),
 
   "lifts": [list of one or more objects, log_lift only -- ALWAYS a list, even for a single exercise, and
     however many distinct exercises are named in the message -- "pull-ups 10x3, then v-bar rows 35kg 8x3, then
@@ -301,11 +355,8 @@ Deciding the intent:
   items into the first one's, if the message clearly describes more than one (e.g. a breakfast-and-lunch
   message must produce two objects, not one with the lunch silently dropped). Estimate calories per meal the
   way an attentive nutrition-tracking assistant would -- a plausible range (calories_low/calories_high) plus a
-  central calories_estimate, not a single falsely-precise number. Lean toward the higher end of that range (not
-  just a uniform across-the-board bump) for dishes that are easy to systematically underestimate:
-  mala/malatang, oily or curry-based soups, curries generally, and restaurant pasta or anything in a
-  cream/mayo-based sauce -- these hide a lot of oil and sauce volume that a plain visual/text estimate tends to
-  miss. Break each meal's own description into
+  central calories_estimate, not a single falsely-precise number. {MEAL_CALORIE_CALIBRATION_NOTE} Break each
+  meal's own description into
   individual items in its "items" list. Set water_ml only when plain water is explicitly mentioned for that
   meal (e.g. "750ml water") -- never estimate it for other drinks, and leave it null if no water is mentioned;
   a plain-water (or other drink) mention with no specific meal slot is still its own object (meal_type null).
@@ -483,14 +534,33 @@ Deciding the intent:
   Distinct from "show_tasks" (to-dos to actively do) and "show_reminders" (daily habits) -- this is specifically
   about dated appointments/events already on the calendar. Answered directly with the real upcoming-events
   list, same discipline as show_tasks/show_reminders.
-- "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain -- money, food,
-  training, and vitals together -- not a single domain's number (e.g. "how am I doing", "how's my week been",
-  "give me a rundown", "how am I doing overall", "what's going on with me lately"). This pulls real 7-day
-  figures across all four domains and synthesizes them in code, the same "real numbers in, never guessed"
-  discipline as show_balance/show_recent -- so use it whenever the ask is genuinely cross-domain or open-ended
-  about how things are going overall. A question clearly about just one domain (a specific meal, a single
-  workout, a vitals reading) is NOT a rundown -- that's "casual", answered in-line from context, or points at
-  the matching /recent-style command.
+- "rundown": the message is asking for a broad status update spanning MORE THAN ONE domain, over MULTIPLE
+  days -- money, food, training, and vitals together, trending over roughly the last week -- not a single
+  domain's number and not one specific day (e.g. "how am I doing", "how's my week been", "give me a rundown",
+  "how am I doing overall", "what's going on with me lately"). This pulls real 7-day figures across all four
+  domains and synthesizes them in code, the same "real numbers in, never guessed" discipline as
+  show_balance/show_recent -- so use it whenever the ask is genuinely cross-domain AND open-ended/multi-day
+  about how things are going overall. If the message names or clearly implies ONE specific day instead (see
+  "day_stats" below), use "day_stats" even if it's also asking across more than one domain (e.g. food +
+  training together) -- "rundown" is specifically for the no-particular-day, trending-over-time case. A
+  question clearly about just one domain within a single already-known item (a specific meal, a single
+  workout, a vitals reading) is NOT a rundown either -- that's "casual", answered in-line from context, or
+  points at the matching /recent-style command.
+- "day_stats": the message is asking what happened, what was eaten, or what the calorie/activity picture was
+  for ONE specific day -- today, yesterday/last night, or a named weekday/calendar date (e.g. "stats from
+  yesterday", "what did I eat today", "show me the stats for Saturday", "calories for the 20th", "how'd I do
+  last night food-wise", a bare "show me the stats again" or "*stats" following an earlier stats question in
+  this conversation -- reuse whichever day was just being discussed). This is answered from a REAL, freshly
+  re-read database total for that exact day (meals in, workouts burned, net, vitals) -- never estimated,
+  re-summed, or "corrected" based on what was said earlier in the conversation, the same "real numbers in,
+  never guessed" discipline as show_balance/rundown. This exists specifically to replace a real observed
+  failure mode: a single-day calorie question used to be answered as "casual", which had the model re-add up
+  raw recent meals/workouts from context by itself every time it was asked, producing a different (sometimes
+  sign-flipped, sometimes outright fabricated) answer on each successive ask. Prefer "day_stats" over "casual"
+  for ANY question about a specific day's food/activity/calorie totals, even a vague follow-up like "show me
+  again" -- never let that fall through to casual and get freehand-recalculated. Only fall back to "casual"
+  for a single-day question that ISN'T about totals at all (e.g. "what did that dry mala taste like" isn't
+  answerable from data and is just conversation).
 - "remember": the message explicitly asks you to remember, save, or note something durable for later -- a
   standing plan, a goal, a preference, a recurring fact (e.g. "remember I go to Fitness First Bugis Tue/Thu for
   legs and back", "my goal is 75kg by December", "remember I'm allergic to shellfish", "note that I prefer
@@ -775,9 +845,7 @@ slot (e.g. a drink or snack between meals), "items": [list of individual food/dr
 "calories_low": number, "calories_high": number, "calories_estimate": number (the central estimate, roughly the \
 midpoint), "water_ml": number or null (ONLY for plain water -- never other drinks; null if no water is \
 mentioned)}}. Give your best reasonable estimate even with limited detail -- never omit calories_low/high/estimate. \
-Lean toward the higher end of the range (not a uniform across-the-board bump) for dishes that are easy to \
-systematically underestimate: mala/malatang, oily or curry-based soups, curries generally, and restaurant pasta \
-or anything in a cream/mayo-based sauce -- these hide a lot of oil and sauce volume a plain estimate tends to miss."""
+{MEAL_CALORIE_CALIBRATION_NOTE}"""
 
 WORKOUT_EXTRACT_SYSTEM_PROMPT = """You extract structured fields from a described workout. Reply with ONLY a \
 JSON object: {"activity": short activity name e.g. "tennis", "IPPT training", "gym", "run", "duration_min": \
@@ -825,10 +893,7 @@ at all:
 {{"kind": "unclear"}}
 
 Use the caption for extra detail if one is given. For kind "meal" always give calories_low/high/estimate, never \
-omit them, and lean toward the higher end of that range (not a uniform across-the-board bump) for dishes that \
-are easy to systematically underestimate: mala/malatang, oily or curry-based soups, curries generally, and \
-restaurant pasta or anything in a cream/mayo-based sauce -- these hide a lot of oil and sauce volume a plain \
-visual estimate tends to miss. For kind "workout" extract whatever fields ARE actually visible on screen -- \
+omit them. {MEAL_CALORIE_CALIBRATION_NOTE} For kind "workout" extract whatever fields ARE actually visible on screen -- \
 leave the rest null rather than guessing at numbers that aren't shown. Never invent a meal or workout that \
 isn't actually shown in the photo -- that produces a nonsense logged entry, which is worse than asking.
 
@@ -842,7 +907,17 @@ instead of a relative word. Leave it null when the caption doesn't mention a day
 just sent and defaults to today. Extract ONLY the day-count -- NEVER compute or output an \
 actual calendar date yourself; the bot converts your count into a real date deterministically, the same \
 discipline used for every other date field in this app. Cap it at 14 (two weeks) -- if the caption implies \
-something older than that, leave logged_days_ago null instead of guessing a huge number."""
+something older than that, leave logged_days_ago null instead of guessing a huge number.
+
+One exception to "leave it null with no caption": for a "workout" daily-activity/fitness-app summary screen \
+specifically (not a single named workout), check the current local time given alongside "Today's actual \
+date" -- if it's shortly after local midnight (roughly within the first hour or so) and the screen shows a \
+substantial day's worth of totals (meaningful active minutes, calories burned, or distance -- not just a \
+couple of stray steps), that data physically cannot have accumulated in the few minutes since the calendar \
+flipped, even with no caption saying so -- it's still showing the day that just ended. In that specific \
+situation, set logged_days_ago to 1 rather than leaving it null. This does NOT apply to a real named workout \
+(e.g. "tennis") or to a photo sent well after midnight, where defaulting to today is still correct -- only to \
+a cumulative daily-totals screen whose numbers are the tell."""
 
 
 def _meal_fallback(seed_text: str | None) -> dict:
@@ -918,7 +993,8 @@ def extract_from_photo(image_bytes: bytes, caption: str | None = None) -> dict:
     b64 = base64.b64encode(image_bytes).decode("ascii")
     user_content = [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-        {"type": "text", "text": f"{_today_context()} " + (caption or "What does this photo show?")},
+        {"type": "text", "text": f"{_today_context()} It's currently {_current_local_time_str()}. "
+                                  + (caption or "What does this photo show?")},
     ]
     return _classify_photo_content(user_content, "extract_from_photo")
 
@@ -965,7 +1041,8 @@ def extract_from_photos(images: list[bytes], caption: str | None = None) -> dict
     ]
     user_content.append({
         "type": "text",
-        "text": (f"{_today_context()} ({len(images)} photos sent together in one message.) "
+        "text": (f"{_today_context()} It's currently {_current_local_time_str()}. "
+                 f"({len(images)} photos sent together in one message.) "
                  + (caption or "What do these show?")),
     })
     return _classify_photo_content(user_content, "extract_from_photos", extra_system_note=MULTI_PHOTO_NOTE)
@@ -1287,6 +1364,47 @@ def answer_with_rundown(payload: dict) -> str:
     return resp.content[0].text.strip()
 
 
+def answer_with_day_stats(payload: dict) -> str:
+    """payload holds real computed figures for exactly ONE day -- meals
+    (count, the actual logged item names, total estimated calories, water),
+    workouts (count, activities, total calories burned), net_calories
+    (calories in minus calories out, or null if nothing at all was logged
+    that day), and vitals (that day's single check-in, or null) -- computed
+    deterministically in Python (see rundown._day_stats_payload), never
+    estimated or re-summed by the model. Returns a short single-day
+    narrative, called only for the 'day_stats' intent (a specific-day
+    question, e.g. "stats from yesterday", "what did I eat Saturday",
+    "calories for the 20th"). Same discipline as answer_with_rundown --
+    real numbers in, plain-language narrative out -- except here getting
+    the numbers right matters even more, since this replaces a path that
+    used to let the model do the arithmetic itself and get it wrong."""
+    client = _get_client()
+    data_str = json.dumps(payload)
+    resp = client.messages.create(
+        model=config.CLAUDE_MODEL,
+        max_tokens=350,
+        system=(
+            "You are Morrow, a personal companion, answering a question about ONE specific day (e.g. "
+            "'stats from yesterday', 'what did I eat Saturday'). You're given real computed figures for "
+            "that exact day: meals (count, the actual food items logged, total estimated calories, "
+            "water), workouts (count, activities, total calories burned), net_calories (calories in minus "
+            "calories out -- POSITIVE means a surplus/ate more than burned, NEGATIVE means a deficit/burned "
+            "more than ate -- use net_calories' own sign exactly as given, never recompute or re-derive it "
+            "yourself), and vitals (that day's check-in, if any). Every number here is already correct and "
+            "final -- restate it plainly, never recalculate, round differently, or 'correct' it based on "
+            "anything said earlier in the conversation; if the user previously disputed a number, this "
+            "fresh read from the database is the real one. If a section is empty (nothing logged), say so "
+            "plainly rather than omitting it silently -- for a single specific day the user is asking "
+            "about, \"nothing logged\" is itself useful information, unlike the multi-day rundown where a "
+            "quiet domain is just skipped. Name the actual food items eaten when there are any, not just "
+            "the total. Write 2-5 short plain-text lines, matter-of-fact, the way a companion who actually "
+            f"checked would answer -- not a report. {TELEGRAM_FORMATTING_NOTE}"
+        ),
+        messages=[{"role": "user", "content": data_str}],
+    )
+    return resp.content[0].text.strip()
+
+
 def _clarify_fallback(message: str) -> dict:
     return {
         "intent": "clarification",
@@ -1302,6 +1420,7 @@ def _clarify_fallback(message: str) -> dict:
         "knee_pain": None,
         "vitals_notes": None,
         "logged_days_ago": None,
+        "day_stats_days_ago": None,
         "tasks": None,
         "reminder_description": None,
         "events": None,

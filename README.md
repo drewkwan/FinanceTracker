@@ -249,6 +249,37 @@ expense-only and answer *today's* numbers directly; `/rundown` is the one
 that reads across money, food, training, and vitals together over the
 last week.
 
+## How day stats works
+
+`/daystats [today|yesterday|N]`, or asking naturally about ONE specific day
+("stats from yesterday", "what did I eat Saturday", "calories for the
+20th", or a bare "show me the stats again" following an earlier stats
+question), answers with real, freshly re-read numbers for exactly that
+day — meals eaten (with the actual item names, not just a total), water,
+workouts and calories burned, net calories, and that day's vitals
+check-in if there is one. Same "real numbers in, never guessed" discipline
+as `/rundown`, just scoped to one day instead of a trailing week.
+
+This exists specifically because a single-day calorie question used to
+fall through to a plain `casual` reply, where Claude was given the last
+~10 raw meals/workouts (not even filtered to the day being asked about)
+and asked to filter, sum, and subtract them itself, in freeform text, from
+scratch, on every single ask. In practice that produced a different (and
+sometimes internally contradictory, even sign-flipped) answer each time
+the same question was re-asked, and once backfilled a fabricated "I
+corrected that entry" explanation for its own inconsistency instead of
+just re-reading the database. `day_stats` guarantees an identical, real DB
+read backs the answer every time instead — if the user disputed a number
+earlier in the conversation, this fresh read is the one that's actually
+right, and the model is told explicitly not to "correct" it based on
+anything said earlier.
+
+`rundown` and `day_stats` are deliberately split on ONE axis: whether the
+message names or implies a specific day. A specific day (even one that
+also spans multiple domains, e.g. "how'd I eat and train yesterday") is
+`day_stats`; an open-ended, no-particular-day, multi-day question ("how's
+my week been") is `rundown`.
+
 ## How the morning briefing works
 
 Every day at a fixed local time (`MORNING_BRIEFING_HOUR`/`MORNING_BRIEFING_MINUTE`
@@ -538,6 +569,7 @@ Message your bot on Telegram — `/start` should reply immediately.
 /removeevent <id>                 remove a scheduled event
 
 /rundown                         cross-domain check-in: money + food + training + vitals, last 7 days
+/daystats [today|yesterday|N]    real calories in/out + activity + vitals for ONE specific day
 /morning                         today's briefing: budget + due/overdue to-dos + reminders + what's coming
                                   up + a look back at yesterday (also sent automatically once a day -- see
                                   "How the morning briefing works")

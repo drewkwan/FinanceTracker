@@ -27,7 +27,7 @@ from nutrition import _log_meals_and_reply, _target_date_from_days_ago
 from events import _add_events_and_reply, _events_text
 from reminders import _add_reminder_and_reply, _reminders_text
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
-from rundown import _rundown_reply_text
+from rundown import _day_stats_reply_text, _rundown_reply_text
 from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
 from vitals import _log_vitals_and_reply
 
@@ -214,6 +214,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # "never let the model guess a number" discipline as show_balance.
         context.chat_data.pop(PENDING_KEY, None)
         await _reply(update, chat_id, await _rundown_reply_text(chat_id))
+        return
+
+    if intent == "day_stats":
+        # Real, freshly re-read DB figures for exactly one named day, handed
+        # to Claude only to narrate -- see rundown._day_stats_payload's
+        # docstring for the real bug this replaces: a single-day calorie
+        # question used to be "casual", which had the model re-derive the
+        # sum/subtraction itself from raw context on every ask.
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(update, chat_id, await _day_stats_reply_text(chat_id, parsed.get("day_stats_days_ago")))
         return
 
     if intent == "log_meal":

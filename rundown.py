@@ -1,8 +1,21 @@
 """
-Cross-domain synthesis: /rundown. Real, deterministically-computed figures
-across all four domains (balance, meals, workouts, vitals) for the trailing
-window -- handed to Claude only to narrate, never to invent a number. Same
-"never let the model guess a number" discipline as finance._balance_text.
+Cross-domain synthesis: /rundown, and the 'day_stats' intent. Real,
+deterministically-computed figures -- across all four domains for the
+trailing window (_rundown_payload), or across meals/workouts/vitals for one
+named day (_day_stats_payload) -- handed to Claude only to narrate, never to
+invent a number. Same "never let the model guess a number" discipline as
+finance._balance_text.
+
+_day_stats_payload exists specifically because a single-day "what did I eat
+yesterday" / "calories in vs out for Saturday" question used to fall through
+to ai.py's generic 'casual' intent, where the model was handed raw recent
+meals/workouts (not even day-filtered) and asked to sum and subtract them
+itself, in freeform text, from scratch, every time it was asked -- a real
+observed bug where the same question got a different, sometimes internally
+contradictory (even sign-flipped) answer on each successive ask, and once
+even backfilled a fake "I corrected that entry" explanation for its own
+inconsistency instead of just re-reading the DB. day_stats guarantees a
+real, identical-every-time DB read backs the answer instead.
 """
 
 import logging
@@ -110,3 +123,130 @@ async def rundown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     await update.message.reply_text(await _rundown_reply_text(chat_id))
+
+
+async def daystats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/daystats [today|yesterday|N] -- command-path equivalent of the
+    natural-language 'day_stats' intent, same "real numbers in" discipline
+    as /rundown vs the 'rundown' intent. Defaults to today with no
+    argument. N is a plain day count (0 = today, 1 = yesterday, ...), same
+    convention as everywhere else in this app."""
+    if await _reject_if_not_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    arg = context.args[0].lower() if context.args else "today"
+    if arg == "today":
+        days_ago = 0
+    elif arg == "yesterday":
+        days_ago = 1
+    else:
+        try:
+            days_ago = max(0, min(14, int(arg)))
+        except ValueError:
+            await update.message.reply_text("Usage: /daystats [today|yesterday|N] -- N = days ago")
+            return
+    await update.message.reply_text(await _day_stats_reply_text(chat_id, days_ago))
+
+
+def _resolve_day(days_ago: int | None) -> str:
+    """Converts the 'day_stats' intent's day_stats_days_ago (a plain
+    day-count, never a date -- same discipline as ai.py's logged_days_ago
+    for photo logging) into a real ISO date deterministically. Unlike
+    nutrition._target_date_from_days_ago (which returns None meaning
+    "leave the log on today, the DB default"), this always returns a
+    concrete date, since a day_stats query has nothing to default onto --
+    it has to know exactly which day to look up. days_ago None or 0 means
+    today."""
+    days_ago = max(0, min(14, int(days_ago))) if days_ago else 0
+    return (date.fromisoformat(db.today_str()) - timedelta(days=days_ago)).isoformat()
+
+
+def _day_stats_payload(chat_id: int, day: str) -> dict:
+    """Real, deterministically-computed figures for exactly ONE day --
+    meals (with the actual logged items, not just a total), workouts,
+    lifts count, and vitals -- fed to ai.answer_with_day_stats for
+    synthesis. This exists specifically so a "what did I eat/burn
+    yesterday" question is answered from a real DB read instead of the
+    model re-deriving totals (and re-subtracting them) from raw recent-item
+    context on every turn -- see handlers.py's 'day_stats' intent branch.
+    Same "real numbers in, never guessed" discipline as _rundown_payload,
+    just scoped to a single named day instead of a trailing window."""
+    next_day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+    meals = db.get_meals_in_range(chat_id, day, next_day)
+    total_calories_in = sum(m["calories_estimate"] or 0 for m in meals)
+    total_water = sum(m["water_ml"] or 0 for m in meals)
+
+    workouts = db.get_workouts_in_range(chat_id, day, next_day)
+    total_calories_out = sum(w["calories_burned"] or 0 for w in workouts)
+
+    vitals = db.get_vitals_in_range(chat_id, day, next_day)
+
+    # Net is only meaningful when there's at least one real number on
+    # either side -- an empty day (nothing logged at all) shouldn't report
+    # "net 0 kcal", which reads as "you ate nothing and burned nothing" (a
+    # real fact) rather than "nothing was logged" (the actual situation).
+    net_calories = (
+        round(total_calories_in - total_calories_out, 0) if (meals or workouts) else None
+    )
+
+    return {
+        "day": day,
+        "is_today": day == db.today_str(),
+        "meals": {
+            "count": len(meals),
+            "items": [item for m in meals for item in (m.get("items") or [])],
+            "total_calories_estimate": total_calories_in if meals else None,
+            "total_water_ml": total_water if meals else None,
+        },
+        "workouts": {
+            "count": len(workouts),
+            "activities": [w["activity"] for w in workouts if w["activity"]],
+            "total_calories_burned": total_calories_out if workouts else None,
+        },
+        "net_calories": net_calories,
+        "vitals": vitals[0] if vitals else None,
+    }
+
+
+def _day_stats_fallback_text(payload: dict) -> str:
+    """Raw, deterministic rendering used only if the Claude synthesis call
+    itself fails -- never silent, same discipline as _rundown_fallback_text."""
+    label = "Today" if payload["is_today"] else payload["day"]
+    lines = [f"{label}:"]
+    meals = payload["meals"]
+    if meals["count"]:
+        items = ", ".join(meals["items"]) or "unspecified items"
+        lines.append(f"Ate: ~{meals['total_calories_estimate']:.0f} kcal ({items})")
+        if meals["total_water_ml"]:
+            lines.append(f"Water: {meals['total_water_ml']:.0f}ml")
+    else:
+        lines.append("Ate: nothing logged")
+    workouts = payload["workouts"]
+    if workouts["count"]:
+        activities = ", ".join(workouts["activities"]) or "unspecified"
+        burned = (
+            f", ~{workouts['total_calories_burned']:.0f} kcal burned"
+            if workouts["total_calories_burned"] else ""
+        )
+        lines.append(f"Trained: {activities}{burned}")
+    if payload["net_calories"] is not None:
+        sign = "-" if payload["net_calories"] < 0 else ""
+        lines.append(f"Net: {sign}{abs(payload['net_calories']):.0f} kcal")
+    vitals = payload["vitals"]
+    if vitals and vitals.get("weight_kg"):
+        lines.append(f"Weight: {vitals['weight_kg']}kg")
+    return "\n".join(lines)
+
+
+async def _day_stats_reply_text(chat_id: int, days_ago: int | None) -> str:
+    """Shared entry point for the natural-language 'day_stats' intent --
+    resolves the day-count to a real date, pulls the real numbers, and
+    hands them to Claude only to narrate (see _day_stats_payload)."""
+    day = _resolve_day(days_ago)
+    payload = _day_stats_payload(chat_id, day)
+    try:
+        return ai.answer_with_day_stats(payload)
+    except Exception:
+        logger.exception("AI day_stats synthesis failed, falling back to raw breakdown")
+        return _day_stats_fallback_text(payload)

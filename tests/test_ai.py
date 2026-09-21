@@ -241,3 +241,71 @@ def test_categorize_accepts_gifts_and_hobbies_categories(monkeypatch):
 def test_categorize_never_raises_on_api_failure(monkeypatch):
     _mock_client(monkeypatch, ConnectionError("network blip"))
     assert ai.categorize("anything") == "Other"
+
+
+# ---------- photo classification: current-time context ----------
+# Regression coverage for a real bad interaction: a "daily activity" screen
+# showing a full day's totals, sent a few minutes after local midnight, got
+# logged onto the NEW day even though that much activity couldn't have
+# accumulated since rollover -- the screen was still showing the day that
+# just ended. Fixed by giving the model the current local time alongside
+# today's date, plus an explicit reasoning rule for this exact shape of
+# screenshot (see PHOTO_CLASSIFY_SYSTEM_PROMPT). These tests only prove the
+# time context actually reaches the model call -- the model's own reasoning
+# from it isn't something a unit test can verify.
+
+class _CapturingFakeClient:
+    """Like _FakeClient, but also records the kwargs each create() call
+    received, so a test can inspect exactly what was sent to Claude."""
+
+    def __init__(self, create_return):
+        self._create_return = create_return
+        self.messages = self
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeResponse(self._create_return)
+
+
+def test_current_local_time_str_returns_hh_mm_format():
+    import re
+    assert re.fullmatch(r"\d{2}:\d{2}", ai._current_local_time_str())
+
+
+def test_extract_from_photo_tells_the_model_the_current_time(monkeypatch):
+    fake = _CapturingFakeClient(json.dumps({"kind": "unclear"}))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    ai.extract_from_photo(b"fake-image-bytes", caption=None)
+    text_block = next(b["text"] for b in fake.calls[0]["messages"][0]["content"] if b["type"] == "text")
+    assert "It's currently" in text_block
+
+
+def test_extract_from_photos_tells_the_model_the_current_time(monkeypatch):
+    fake = _CapturingFakeClient(json.dumps({"kind": "unclear"}))
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    ai.extract_from_photos([b"img1", b"img2"], caption=None)
+    text_block = next(b["text"] for b in fake.calls[0]["messages"][0]["content"] if b["type"] == "text")
+    assert "It's currently" in text_block
+
+
+# ---------- meal calorie calibration ----------
+# Regression guard against drift: this calibration text used to be three
+# separately hand-maintained copies (parse_message's log_meal rules,
+# MEAL_ESTIMATE_SYSTEM_PROMPT, PHOTO_CLASSIFY_SYSTEM_PROMPT) -- now a single
+# shared constant referenced by all three, so they can't quietly diverge.
+
+def test_calorie_calibration_note_present_in_all_three_prompts():
+    assert ai.MEAL_CALORIE_CALIBRATION_NOTE in ai.PARSE_SYSTEM_PROMPT
+    assert ai.MEAL_CALORIE_CALIBRATION_NOTE in ai.MEAL_ESTIMATE_SYSTEM_PROMPT
+    assert ai.MEAL_CALORIE_CALIBRATION_NOTE in ai.PHOTO_CLASSIFY_SYSTEM_PROMPT
+
+
+def test_calorie_calibration_note_generalizes_beyond_the_named_dish_list():
+    """The old wording only biased a short named-dish list upward; the
+    broadened version has to apply to restaurant/hawker/fried food as a
+    general category, not just those examples."""
+    note = ai.MEAL_CALORIE_CALIBRATION_NOTE
+    assert "restaurant" in note.lower()
+    assert "hawker" in note.lower()
+    assert "mala" in note.lower()  # the original named examples are kept, not dropped

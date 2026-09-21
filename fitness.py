@@ -25,12 +25,26 @@ def _find_duplicate_workout(chat_id: int, target_date: str, calories_burned: flo
     no-op for that path), and only flags an actual MATCH: a small tolerance
     (2%, minimum 5 kcal) absorbs rounding differences between two screens of
     the SAME data, not two genuinely different workouts that happen to burn
-    a similar amount."""
+    a similar amount.
+
+    Checks a ONE-DAY-EITHER-SIDE window, not just target_date itself -- a
+    real observed failure mode: two related photos (e.g. a named workout
+    and that same day's daily-activity total) landed on ADJACENT dates
+    instead of the same one, because only one of the two photos actually
+    carried usable date context. Same-date matching alone would silently
+    miss that case entirely -- exactly when this check matters most, since
+    a wrong date is also the case most likely to slip past the user's own
+    read of "today's" total looking reasonable. Widening the window trades
+    a little precision (a genuinely different workout on the adjacent day
+    that happens to burn a similar amount could false-positive) for
+    actually catching the failure this function exists for -- and a false
+    positive here only asks a question, it never silently drops data."""
     if not calories_burned:
         return None
-    next_day = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    window_start = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
+    window_end = (date.fromisoformat(target_date) + timedelta(days=2)).isoformat()
     tolerance = max(5.0, 0.02 * calories_burned)
-    for w in db.get_workouts_in_range(chat_id, target_date, next_day):
+    for w in db.get_workouts_in_range(chat_id, window_start, window_end):
         existing = w.get("calories_burned")
         if existing and abs(existing - calories_burned) <= tolerance:
             return w
