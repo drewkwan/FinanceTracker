@@ -152,21 +152,34 @@ natural-language pattern.
 - **Corrections** work the same way as expenses for the common cases — "that
   meal was actually two days ago" or "delete that, I logged it twice" both
   resolve by natural language, with the same before/after confirmation and
-  one-word `undo`. This applies to meals, workouts, and vitals check-ins too.
-  Field-level edits (fixing an activity name or a vitals reading) aren't
-  wired up yet for workouts/vitals — only moving the date or deleting an
-  entry — so a request for anything else gets a clarifying message rather
-  than being silently ignored.
-- **Meals get one field-level edit that workouts/vitals don't yet: correcting
-  what was actually eaten**, without deleting and relogging from scratch —
-  e.g. "minus the ramen noodles, I didn't have that" or "I also had a side
-  salad". Morrow re-estimates calories fresh for the corrected item list
-  (the same plausible-range discipline as a brand-new log) and applies it in
-  one shot; reverses with one-word `undo` like every other correction. This
-  exists specifically because a photo-logged meal is the one place a
-  hallucinated extra item (see above) is most likely to slip in, and
-  deleting the whole entry to fix one wrong item was real, reported
-  friction.
+  one-word `undo`. This applies to meals, workouts, lifts, and vitals
+  check-ins too. Vitals is the one domain without a field-level edit yet —
+  only moving the date or deleting an entry — so a request for anything
+  else there gets a clear "that kind of edit isn't supported yet" message
+  naming what actually is, rather than a confusing off-topic question or
+  being silently ignored.
+- **Meals, workouts, and lifts each get a field-level edit**, correcting
+  what's actually in an already-logged entry without deleting and
+  relogging from scratch:
+  - Meals: what was actually eaten/drunk — e.g. "minus the ramen noodles, I
+    didn't have that" or "I also had a side salad". Morrow re-estimates
+    calories fresh for the corrected item list (the same plausible-range
+    discipline as a brand-new log) and applies it in one shot. This exists
+    specifically because a photo-logged meal is the one place a
+    hallucinated extra item (see above) is most likely to slip in, and
+    deleting the whole entry to fix one wrong item was real, reported
+    friction.
+  - Workouts: activity, duration, distance, calories burned, or notes —
+    e.g. "correct the calories out to 2862" when a photo-read total (say,
+    a specific workout's burn) turns out to only be part of the real
+    number a tracker later showed (the full day's total including basal
+    metabolic rate).
+  - Lifts: sets, location, effort, or notes — e.g. "the v bar rows were
+    actually 10x8x1 and 12x8x2", the same "give me the whole corrected
+    picture, not just the diff" discipline as a meal's item-list
+    correction, not a delete-and-relog round trip for a mis-typed rep
+    count.
+  All three reverse with one-word `undo` like every other correction.
 
 ## How structured lift logging works
 
@@ -193,8 +206,9 @@ natural-language pattern.
   future one, captured rather than discarded.
 - `/loglift <description>` logs one exercise by command (e.g. `/loglift
   bench press 80kg 4x3 at biopolis`); `/recentlifts [n]` lists recent ones.
-  Corrections work the same narrow way as workouts/vitals — moving the date
-  or deleting one, with one-word `undo` — via natural language.
+  Corrections via natural language cover moving the date, correcting the
+  sets/location/effort/notes (see "How meal and workout logging works"
+  above), or deleting one — each with one-word `undo`.
 - **This is Phase A of a larger coaching-engine plan, not the whole
   thing.** Nothing reads this data to give a verdict, compare it against a
   progression target, or prescribe next-session numbers yet — right now

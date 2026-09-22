@@ -73,14 +73,19 @@ CORRECTION_ACTIONS = {
 # PARSE_SYSTEM_PROMPT correction rules).
 SIMPLE_DOMAIN_ACTIONS = {"edit_date", "delete"}
 TASK_DOMAIN_ACTIONS = {"mark_done", "edit_task", "delete"}
-# meal gets its own bucket, one step wider than workout/vitals' SIMPLE_DOMAIN_ACTIONS --
-# edit_meal (a flexible items/calories correction, mirroring edit_task) exists specifically
-# for a photo- or text-logged meal that came out wrong (an item that wasn't really eaten,
-# a portion size off) without forcing a delete-and-relog round trip. workout/vitals don't
-# get it yet -- no observed real-world need for it there so far, unlike meals (a photo
-# hallucinating an extra item that was never actually eaten is a real, repeatable failure
-# mode this domain is uniquely exposed to -- see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT).
+# meal/workout/lift each get their own bucket, one step wider than vitals' plain
+# SIMPLE_DOMAIN_ACTIONS -- edit_meal/edit_workout/edit_lift (flexible field corrections,
+# mirroring edit_task) exist specifically so a photo- or text-logged entry that came out
+# wrong (an item that wasn't really eaten, a workout's calories_burned read wrong off a
+# screenshot, a lift's sets mis-typed) can be fixed in place without forcing a
+# delete-and-relog round trip. vitals doesn't get one yet -- no observed real-world need
+# there so far, unlike these three (see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT for the meal
+# case, and a real observed bad interaction for workout/lift: "correct the calories out to
+# 2862" / "update the v bar pulls to 10x8x1, 12x8x2" both had no supported action to land
+# on, forcing the model into either a nonsense date-clarification question or a dead end).
 MEAL_DOMAIN_ACTIONS = {"edit_date", "edit_meal", "delete"}
+WORKOUT_DOMAIN_ACTIONS = {"edit_date", "edit_workout", "delete"}
+LIFT_DOMAIN_ACTIONS = {"edit_date", "edit_lift", "delete"}
 # event gets the narrowest bucket of all -- an event has no "done" state and no other
 # editable field via natural language yet (rescheduling stays command-only, see
 # events.py's module docstring), so "delete" is the only thing a correction can do to one.
@@ -93,13 +98,16 @@ _DOMAIN_OPS = {
               "get": db.get_meal, "edit_date": db.edit_meal_date, "delete": db.delete_meal,
               "restore": db.restore_deleted_meal, "line": _meal_line, "edit_meal": db.edit_meal},
     "workout": {"noun": "workout", "recent_cmd": "/recentworkouts", "date_field": "workout_date",
-                 "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
+                 "actions": WORKOUT_DOMAIN_ACTIONS,
+                 "actions_desc": "moving the date, correcting a field (activity/duration/distance/calories "
+                                  "burned/notes), or deleting one",
                  "get": db.get_workout, "edit_date": db.edit_workout_date, "delete": db.delete_workout,
-                 "restore": db.restore_deleted_workout, "line": _workout_line},
+                 "restore": db.restore_deleted_workout, "line": _workout_line, "edit_workout": db.edit_workout},
     "lift": {"noun": "lift", "recent_cmd": "/recentlifts", "date_field": "lift_date",
-              "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
+              "actions": LIFT_DOMAIN_ACTIONS,
+              "actions_desc": "moving the date, correcting the sets/location/effort/notes, or deleting one",
               "get": db.get_lift, "edit_date": db.edit_lift_date, "delete": db.delete_lift,
-              "restore": db.restore_deleted_lift, "line": _lift_line},
+              "restore": db.restore_deleted_lift, "line": _lift_line, "edit_lift": db.edit_lift},
     "vitals": {"noun": "check-in", "recent_cmd": "/recentvitals", "date_field": "vitals_date",
                 "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
                 "get": db.get_vitals, "edit_date": db.edit_vitals_date, "delete": db.delete_vitals,
@@ -279,6 +287,90 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
             "domain": domain, "action": "edit_meal", "expense_id": target_id,
             "old_meal_type": old_meal_type, "old_items": old_items, "old_calories_low": old_low,
             "old_calories_high": old_high, "old_calories_estimate": old_estimate, "old_water_ml": old_water_ml,
+        }
+        await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
+        return
+
+    if action == "edit_workout":
+        # Corrects a field on an already-logged workout -- most commonly
+        # calories_burned read wrong off a fitness-app screenshot, or a
+        # more complete/authoritative total (e.g. including BMR) the user
+        # later saw -- without deleting and relogging from scratch. See
+        # ai.py's edit_workout prompt rules.
+        new_activity = parsed.get("new_workout_activity")
+        new_duration = parsed.get("new_workout_duration_min")
+        new_distance = parsed.get("new_workout_distance_km")
+        new_calories = parsed.get("new_workout_calories_burned")
+        new_notes = parsed.get("new_workout_notes")
+
+        if all(v is None for v in (new_activity, new_duration, new_distance, new_calories, new_notes)):
+            await _reply(
+                update, chat_id,
+                f"What should I fix about that {noun} -- the activity, duration, distance, calories burned, "
+                "or notes?"
+            )
+            return
+
+        edits = {}
+        if new_activity is not None:
+            edits["new_activity"] = new_activity
+        if new_duration is not None:
+            edits["new_duration_min"] = new_duration
+        if new_distance is not None:
+            edits["new_distance_km"] = new_distance
+        if new_calories is not None:
+            edits["new_calories_burned"] = new_calories
+        if new_notes is not None:
+            edits["new_notes"] = new_notes
+
+        old_activity, old_duration = row["activity"], row["duration_min"]
+        old_distance, old_calories, old_notes = row["distance_km"], row["calories_burned"], row["notes"]
+        updated = ops["edit_workout"](chat_id, target_id, **edits)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "edit_workout", "expense_id": target_id,
+            "old_activity": old_activity, "old_duration_min": old_duration, "old_distance_km": old_distance,
+            "old_calories_burned": old_calories, "old_notes": old_notes,
+        }
+        await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
+        return
+
+    if action == "edit_lift":
+        # Corrects a field on an already-logged lift -- most commonly the
+        # sets themselves (a mis-typed rep count, a set left out or added
+        # after the fact) -- without deleting and relogging the exercise
+        # from scratch. See ai.py's edit_lift prompt rules.
+        new_exercise = parsed.get("new_lift_exercise")
+        new_location = parsed.get("new_lift_location")
+        new_sets = parsed.get("new_lift_sets")
+        new_effort = parsed.get("new_lift_effort")
+        new_context_notes = parsed.get("new_lift_context_notes")
+
+        if all(v is None for v in (new_exercise, new_location, new_sets, new_effort, new_context_notes)):
+            await _reply(
+                update, chat_id,
+                f"What should I fix about that {noun} -- the sets, location, effort, or notes?"
+            )
+            return
+
+        edits = {}
+        if new_exercise is not None:
+            edits["new_exercise"] = new_exercise
+        if new_location is not None:
+            edits["new_location"] = new_location
+        if new_sets is not None:
+            edits["new_sets"] = new_sets
+        if new_effort is not None:
+            edits["new_effort"] = new_effort
+        if new_context_notes is not None:
+            edits["new_context_notes"] = new_context_notes
+
+        old_exercise, old_location, old_sets = row["exercise"], row["location"], row["sets"]
+        old_effort, old_context_notes = row["effort"], row["context_notes"]
+        updated = ops["edit_lift"](chat_id, target_id, **edits)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "edit_lift", "expense_id": target_id,
+            "old_exercise": old_exercise, "old_location": old_location, "old_sets": old_sets,
+            "old_effort": old_effort, "old_context_notes": old_context_notes,
         }
         await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
         return
@@ -569,6 +661,20 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
                 chat_id, snap["expense_id"], new_meal_type=snap["old_meal_type"], new_items=snap["old_items"],
                 new_calories_low=snap["old_calories_low"], new_calories_high=snap["old_calories_high"],
                 new_calories_estimate=snap["old_calories_estimate"], new_water_ml=snap["old_water_ml"],
+            )
+            await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
+        elif action == "edit_workout":
+            row = ops["edit_workout"](
+                chat_id, snap["expense_id"], new_activity=snap["old_activity"],
+                new_duration_min=snap["old_duration_min"], new_distance_km=snap["old_distance_km"],
+                new_calories_burned=snap["old_calories_burned"], new_notes=snap["old_notes"],
+            )
+            await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
+        elif action == "edit_lift":
+            row = ops["edit_lift"](
+                chat_id, snap["expense_id"], new_exercise=snap["old_exercise"],
+                new_location=snap["old_location"], new_sets=snap["old_sets"],
+                new_effort=snap["old_effort"], new_context_notes=snap["old_context_notes"],
             )
             await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
         return True

@@ -898,6 +898,31 @@ def edit_workout_date(chat_id: int, workout_id: int, new_date_str: str) -> dict 
     return get_workout(chat_id, workout_id)
 
 
+def edit_workout(chat_id: int, workout_id: int, new_activity=_UNSET, new_duration_min=_UNSET,
+                  new_distance_km=_UNSET, new_calories_burned=_UNSET, new_notes=_UNSET) -> dict | None:
+    """Corrects a field on an already-logged workout (most commonly
+    calories_burned, e.g. a photo's workout-summary total was read
+    wrong or the user's tracker later showed a more complete number
+    including BMR) without deleting and relogging from scratch. Same
+    _UNSET "only touch what's passed" discipline as edit_meal/edit_task --
+    see db._UNSET's docstring, defined above this in db.py."""
+    row = get_workout(chat_id, workout_id)
+    if row is None:
+        return None
+    final_activity = row["activity"] if new_activity is _UNSET else new_activity
+    final_duration = row["duration_min"] if new_duration_min is _UNSET else new_duration_min
+    final_distance = row["distance_km"] if new_distance_km is _UNSET else new_distance_km
+    final_calories = row["calories_burned"] if new_calories_burned is _UNSET else new_calories_burned
+    final_notes = row["notes"] if new_notes is _UNSET else new_notes
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE workouts SET activity = ?, duration_min = ?, distance_km = ?, calories_burned = ?, "
+            "notes = ? WHERE id = ? AND chat_id = ?",
+            (final_activity, final_duration, final_distance, final_calories, final_notes, workout_id, chat_id),
+        )
+    return get_workout(chat_id, workout_id)
+
+
 def delete_workout(chat_id: int, workout_id: int) -> dict | None:
     row = get_workout(chat_id, workout_id)
     if row is None:
@@ -1008,6 +1033,31 @@ def edit_lift_date(chat_id: int, lift_id: int, new_date_str: str) -> dict | None
         conn.execute(
             "UPDATE lifts SET lift_date = ? WHERE id = ? AND chat_id = ?",
             (new_date_str, lift_id, chat_id),
+        )
+    return get_lift(chat_id, lift_id)
+
+
+def edit_lift(chat_id: int, lift_id: int, new_exercise=_UNSET, new_location=_UNSET, new_sets=_UNSET,
+              new_effort=_UNSET, new_context_notes=_UNSET) -> dict | None:
+    """Corrects a field on an already-logged lift -- most commonly the sets
+    themselves (a mis-typed rep count, a set left out, a set that wasn't
+    actually done) -- without deleting and relogging the exercise from
+    scratch. Same _UNSET "only touch what's passed" discipline as
+    edit_meal/edit_workout -- see db._UNSET's docstring above."""
+    row = get_lift(chat_id, lift_id)
+    if row is None:
+        return None
+    final_exercise = row["exercise"] if new_exercise is _UNSET else new_exercise
+    final_location = row["location"] if new_location is _UNSET else new_location
+    final_sets = row["sets"] if new_sets is _UNSET else new_sets
+    final_effort = row["effort"] if new_effort is _UNSET else new_effort
+    final_context_notes = row["context_notes"] if new_context_notes is _UNSET else new_context_notes
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE lifts SET exercise = ?, location = ?, sets = ?, effort = ?, context_notes = ? "
+            "WHERE id = ? AND chat_id = ?",
+            (final_exercise, final_location, json.dumps(final_sets or []), final_effort, final_context_notes,
+             lift_id, chat_id),
         )
     return get_lift(chat_id, lift_id)
 

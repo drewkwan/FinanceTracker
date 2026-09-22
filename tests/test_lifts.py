@@ -3,11 +3,10 @@ Tests for the lifts domain (Phase A of the coaching-engine work): db.py CRUD
 (including the sets-as-JSON round trip), ai.py's extract_lift resilience and
 parse_message's recent_lifts context injection, and bot.py's natural-
 language/command logging (single exercise and a multi-exercise session in
-one message) plus the edit_date/delete-only correction surface (same
-SIMPLE_DOMAIN_ACTIONS bucket as workout/vitals -- see correction.py's
-_DOMAIN_OPS), including undo. Same discipline as the rest of the suite: no
-real network, no real Claude calls (ai._get_client is always mocked),
-throwaway SQLite per test.
+one message) plus the edit_date/edit_lift/delete correction surface (see
+correction.py's _DOMAIN_OPS and LIFT_DOMAIN_ACTIONS), including undo. Same
+discipline as the rest of the suite: no real network, no real Claude calls
+(ai._get_client is always mocked), throwaway SQLite per test.
 """
 
 import asyncio
@@ -49,6 +48,27 @@ def test_edit_lift_date():
     lift_id = db.add_lift(CHAT, "squat", "AF Wheelock", [{"reps": 5, "load": "90kg"}])
     updated = db.edit_lift_date(CHAT, lift_id, "2026-09-01")
     assert updated["lift_date"] == "2026-09-01"
+
+
+def test_edit_lift_only_touches_fields_passed():
+    """Regression test for a real bad interaction: a mis-typed v-bar-rows
+    set (one set logged, a second one missed) had no way to be fixed
+    without deleting and relogging the whole exercise. edit_lift's _UNSET
+    "only touch what's passed" discipline (same as edit_meal) must leave
+    every other field exactly as it was."""
+    lift_id = db.add_lift(CHAT, "v bar rows", "Visa gym", [{"reps": 8, "load": "setting 10"}],
+                           effort="grindy", context_notes="usually does 3 sets")
+    new_sets = [{"reps": 8, "load": "setting 10"}, {"reps": 8, "load": "setting 12"}]
+    updated = db.edit_lift(CHAT, lift_id, new_sets=new_sets)
+    assert updated["sets"] == new_sets
+    assert updated["exercise"] == "v bar rows"  # untouched
+    assert updated["location"] == "Visa gym"  # untouched
+    assert updated["effort"] == "grindy"  # untouched
+    assert updated["context_notes"] == "usually does 3 sets"  # untouched
+
+
+def test_edit_lift_returns_none_for_missing_lift():
+    assert db.edit_lift(CHAT, 999999, new_effort="to failure") is None
 
 
 def test_delete_and_restore_lift_roundtrip():
@@ -263,3 +283,53 @@ def test_correction_can_edit_a_lift_date_and_undo(monkeypatch):
     undo_update = FakeUpdate(CHAT, text="undo")
     _run(bot.handle_text(undo_update, context))
     assert db.get_lift(CHAT, lift_id)["lift_date"] == original_date
+
+
+def test_correction_can_edit_a_lifts_sets_and_undo(monkeypatch):
+    """Regression test for a real bad interaction: correcting a v-bar-rows
+    entry's sets used to have no supported action at all, and the model
+    would sometimes wrongly emit correction_action="edit_date" instead
+    (producing a nonsense "which day?" question) rather than a proper
+    field edit."""
+    db.get_or_create_user(CHAT)
+    lift_id = db.add_lift(CHAT, "v bar rows", "Visa gym", [{"reps": 8, "load": "setting 10"}])
+    original_sets = db.get_lift(CHAT, lift_id)["sets"]
+    corrected_sets = [{"reps": 8, "load": "setting 10"}, {"reps": 8, "load": "setting 12"}]
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "lift", "target_expense_id": lift_id,
+            "correction_action": "edit_lift", "new_lift_sets": corrected_sets,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    edit_update = FakeUpdate(CHAT, text="the v bar rows were actually 10x8x1 and 12x8x2")
+    _run(bot.handle_text(edit_update, context))
+    assert db.get_lift(CHAT, lift_id)["sets"] == corrected_sets
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_lift(CHAT, lift_id)["sets"] == original_sets
+
+
+def test_correction_edit_lift_with_nothing_set_asks_what_to_fix(monkeypatch):
+    db.get_or_create_user(CHAT)
+    lift_id = db.add_lift(CHAT, "squat", "Visa gym", [{"reps": 5, "load": "90kg"}])
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "lift", "target_expense_id": lift_id,
+            "correction_action": "edit_lift",
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="fix that squat")
+    _run(bot.handle_text(update, FakeContext()))
+    assert "What should I fix" in update.message.replies[-1]

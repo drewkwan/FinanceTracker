@@ -120,6 +120,100 @@ def test_edit_workout_date_and_delete_restore():
     assert restored["calories_burned"] == 310  # must carry through delete/restore, not just get dropped
 
 
+def test_edit_workout_only_touches_fields_passed():
+    """Regression test for a real bad interaction: a photo-read
+    calories_burned that turned out to only cover one workout, not the
+    day's real total including BMR, had no way to be corrected without
+    deleting and relogging the whole entry."""
+    workout_id = db.add_workout(CHAT, "daily activity", duration_min=108, calories_burned=934,
+                                 notes="Steps: 14,524")
+    updated = db.edit_workout(CHAT, workout_id, new_calories_burned=2862)
+    assert updated["calories_burned"] == 2862
+    assert updated["activity"] == "daily activity"  # untouched
+    assert updated["duration_min"] == 108  # untouched
+    assert updated["notes"] == "Steps: 14,524"  # untouched
+
+
+def test_edit_workout_returns_none_for_missing_workout():
+    assert db.edit_workout(CHAT, 999999, new_calories_burned=100) is None
+
+
+# ---------- correction.py: edit_workout / edit_lift dispatch ----------
+
+def test_correction_can_edit_workout_calories_burned_and_undo(monkeypatch):
+    """Regression test for a real bad interaction: "correct the calories out
+    to 2862" used to have no supported action at all for a workout target,
+    and the model would sometimes wrongly emit correction_action="edit_date"
+    instead (producing a nonsense "which day?" question) rather than a
+    proper field edit."""
+    db.get_or_create_user(CHAT)
+    workout_id = db.add_workout(CHAT, "daily activity", calories_burned=934)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "workout", "target_expense_id": workout_id,
+            "correction_action": "edit_workout", "new_workout_calories_burned": 2862,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    edit_update = FakeUpdate(CHAT, text="correct the calories out to 2862")
+    _run(bot.handle_text(edit_update, context))
+    assert db.get_workout(CHAT, workout_id)["calories_burned"] == 2862
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_workout(CHAT, workout_id)["calories_burned"] == 934
+
+
+def test_correction_edit_workout_with_nothing_set_asks_what_to_fix(monkeypatch):
+    db.get_or_create_user(CHAT)
+    workout_id = db.add_workout(CHAT, "run", calories_burned=300)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "workout", "target_expense_id": workout_id,
+            "correction_action": "edit_workout",
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="fix that workout")
+    _run(bot.handle_text(update, FakeContext()))
+    assert "What should I fix" in update.message.replies[-1]
+
+
+def test_correction_unsupported_field_gives_accurate_message_not_edit_date(monkeypatch):
+    """Regression test for the exact observed bug: a request for a field
+    edit that isn't supported for a domain must produce the accurate "not
+    supported yet" message (naming what IS supported), never the nonsense
+    "which day did you mean?" question that came from wrongly defaulting
+    to correction_action="edit_date" with no day actually mentioned."""
+    db.get_or_create_user(CHAT)
+    vitals_id = db.add_vitals(CHAT, weight_kg=76.0)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
+            "correction_action": "edit_unsupported_field",
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="actually my sleep was 8 hours not 6")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "isn't supported yet" in reply
+    assert "which day" not in reply.lower()
+
+
 # ---------- ai.py: extract_meal / extract_from_photo / extract_workout ----------
 
 def test_extract_meal_happy_path(monkeypatch):

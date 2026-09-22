@@ -272,7 +272,7 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     compatibility; "balance" is different from the rest -- see below and the adjust_balance rule),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
     list; not applicable/always null for target_domain="balance", which has no recent-item list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "adjust_balance" or null (correction only),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "edit_workout" | "edit_lift" | "adjust_balance" | "edit_unsupported_field" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back -- for an explicit calendar date
     or weekday ("move it to the 18th"), compute this against "Today's actual date" given at the top of this
@@ -306,6 +306,28 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     with calories_low/high above),
   "new_meal_water_ml": number or null (correction + edit_meal only -- ONLY set if the message actually changes
     the water amount; leave null to keep whatever was already logged),
+  "new_workout_activity": string or null (correction + edit_workout only, target_domain="workout" -- ONLY set
+    if the message actually renames the activity),
+  "new_workout_duration_min": number or null (correction + edit_workout only -- ONLY set if the message
+    actually changes the duration),
+  "new_workout_distance_km": number or null (correction + edit_workout only -- ONLY set if the message
+    actually changes the distance),
+  "new_workout_calories_burned": number or null (correction + edit_workout only -- ONLY set if the message
+    actually changes calories burned, e.g. a more complete/authoritative total the user saw afterward),
+  "new_workout_notes": string or null (correction + edit_workout only -- ONLY set if the message adds/changes
+    a note),
+  "new_lift_exercise": string or null (correction + edit_lift only, target_domain="lift" -- ONLY set if the
+    message actually renames the exercise),
+  "new_lift_location": string or null (correction + edit_lift only -- ONLY set if the message actually
+    changes the gym/location),
+  "new_lift_sets": [list of {{"reps": integer or null, "load": string or null}}] or null (correction +
+    edit_lift only -- the FULL corrected set list for the exercise, not just what changed, same "whole
+    picture, not a diff" discipline as new_meal_items -- e.g. adding a missed second set still means
+    re-listing the first set too, same "load" string-not-number discipline as log_lift's own sets field),
+  "new_lift_effort": string or null (correction + edit_lift only -- ONLY set if the message actually
+    changes it),
+  "new_lift_context_notes": string or null (correction + edit_lift only -- ONLY set if the message actually
+    changes it),
   "new_description": string or null (correction + edit_description only, target_domain="expense"; ALSO reused
     for correction + edit_task, target_domain="task" -- the to-do's corrected title, ONLY set if the message
     actually changes the title itself, not just its due date or notes),
@@ -455,18 +477,30 @@ Deciding the intent:
   note above on resolving a bare number that matches BOTH a task id and an event id). Set target_expense_id to
   its "id". Only
   "expense" targets
-  support edit_currency/edit_amount/edit_description/edit_category -- for "workout", "lift", or "vitals"
-  targets, only "edit_date" and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal"
-  (a flexible items/calories correction -- see below), and "delete" are supported; for "task" targets,
-  "mark_done", "edit_task" (a flexible title/due-date/notes edit -- see below), and "delete" are supported; for
-  "event" targets, only "delete" is supported (an event has no "done" state and rescheduling is command-only
-  right now -- see target_domain="event"'s own paragraph below). If the user wants some other field fixed
-  on a workout/lift/vitals, use "clarification" and say only those specific corrections work for that domain right
-  now. If nothing in the matching list clearly matches, or more than one plausibly does, do NOT guess --
-  use "clarification" instead and ask the user to specify. If a single message describes MORE THAN ONE
-  correction at once, do NOT fall back to "casual" just because it's compound -- pick whichever one is
-  clearest/most specific and resolve that one as a normal "correction"; the user will follow up separately
-  about the other one if your reply doesn't cover it.
+  support edit_currency/edit_amount/edit_description/edit_category -- for "vitals" targets, only "edit_date"
+  and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal" (a flexible items/
+  calories correction -- see below), and "delete" are supported; for "workout" targets, "edit_date",
+  "edit_workout" (a flexible activity/duration/distance/calories-burned/notes correction -- see below), and
+  "delete" are supported; for "lift" targets, "edit_date", "edit_lift" (a flexible sets/location/effort/notes
+  correction -- see below), and "delete" are supported; for "task" targets, "mark_done", "edit_task" (a
+  flexible title/due-date/notes edit -- see below), and "delete" are supported; for "event" targets, only
+  "delete" is supported (an event has no "done" state and rescheduling is command-only right now -- see
+  target_domain="event"'s own paragraph below).
+
+  CRITICAL: never default to "edit_date" just because it's the first-listed or most familiar action -- only
+  use "edit_date" when the message is actually about WHEN something happened (a day/date), never as a
+  fallback guess for a request that's actually about some other field. A real observed bug this fixes:
+  "correct the calories out to 2862" (a workout's calories_burned, before edit_workout existed to handle it
+  properly) got misclassified as correction_action="edit_date" with no day mentioned, producing a nonsense
+  "which day did you mean?" question completely unrelated to what was actually asked. If the user wants a
+  field fixed that genuinely isn't in that domain's supported-actions list above (currently only vitals and
+  event have real gaps left), set correction_action="edit_unsupported_field" instead of guessing at the
+  closest-sounding valid action -- this produces an accurate "that kind of edit isn't supported yet" reply
+  naming what IS supported, instead of a confusing off-topic question. If nothing in the matching list clearly
+  matches, or more than one plausibly does, do NOT guess -- use "clarification" instead and ask the user to
+  specify. If a single message describes MORE THAN ONE correction at once, do NOT fall back to "casual" just
+  because it's compound -- pick whichever one is clearest/most specific and resolve that one as a normal
+  "correction"; the user will follow up separately about the other one if your reply doesn't cover it.
   target_domain="balance" (correction_action is always "adjust_balance") is its own case, unlike every other
   domain above: it has no recent-item list and no target_expense_id to match, because the rolled-over balance
   is one running number per chat, not a row. Use it when the user wants to correct the balance/deficit ITSELF
@@ -503,6 +537,28 @@ Deciding the intent:
   new_meal_water_ml if the message specifically changes those too; leave them null otherwise (meaning
   unchanged). If the message is about a meal but it's unclear what actually changed, use "clarification" and
   ask what to fix, rather than guessing at what was really eaten.
+  correction_action="edit_workout" (target_domain="workout" only) corrects a field on an already-logged
+  workout, WITHOUT deleting and relogging it from scratch -- the case this exists for is a photo-read
+  calories_burned that turns out wrong (e.g. it only captured one workout's burn, not the day's full total
+  including BMR, and the user later saw the real number), or any other workout field (activity name, duration,
+  distance, notes) needing a fix. Examples: "correct the calories out to 2862", "actually that run was 5.2km
+  not 5", "that was cycling, not running". Set ONLY the field(s) the message actually changes
+  (new_workout_activity/new_workout_duration_min/new_workout_distance_km/new_workout_calories_burned/
+  new_workout_notes) -- leave the rest null, meaning unchanged; a message correcting just the calories burned
+  sets ONLY new_workout_calories_burned, not the others. If the message is about a workout but it's unclear
+  what actually changed, use "clarification" and ask what to fix.
+  correction_action="edit_lift" (target_domain="lift" only) corrects a field on an already-logged lift,
+  WITHOUT deleting and relogging the exercise from scratch -- the case this exists for is a mis-typed or
+  incomplete set (a rep count wrong, a set left out entirely, an extra set that wasn't actually done).
+  Examples: "the v bar rows were actually 10x8x1 and 12x8x2" (the corrected full set list), "I actually did 3
+  sets of pull-ups not 2" (a set added), "drop the last set of curls, my form broke down and I don't want it
+  logged" (a set removed). When new_lift_sets is set, it must be the FULL corrected set list, the same "whole
+  picture, not a diff" discipline as new_meal_items -- use the lift's current sets (from the recent-lifts list
+  you were given) as the starting point, then add/remove/adjust exactly what the message says; "load" stays a
+  string exactly like log_lift's own sets field (a machine setting is just as valid as a real weight). Only set
+  new_lift_exercise/new_lift_location/new_lift_effort/new_lift_context_notes if the message specifically
+  changes those too; leave them null otherwise. If the message is about a lift but it's unclear what actually
+  changed, use "clarification" and ask what to fix.
   target_domain="event" is a narrower case than every domain above -- an event has no "done" state to set (see
   events.py's design: it's a flat, dated occurrence, not a to-do), so correction_action is ALWAYS "delete" for
   it, never "mark_done" -- phrasing like "the X-ray is done", "that appointment already happened", "cancel
@@ -1438,6 +1494,16 @@ def _clarify_fallback(message: str) -> dict:
         "new_meal_calories_high": None,
         "new_meal_calories_estimate": None,
         "new_meal_water_ml": None,
+        "new_workout_activity": None,
+        "new_workout_duration_min": None,
+        "new_workout_distance_km": None,
+        "new_workout_calories_burned": None,
+        "new_workout_notes": None,
+        "new_lift_exercise": None,
+        "new_lift_location": None,
+        "new_lift_sets": None,
+        "new_lift_effort": None,
+        "new_lift_context_notes": None,
         "memory_label": None,
         "memory_content": None,
         "memory_category": None,
@@ -1455,9 +1521,36 @@ def _strip_fences(raw: str) -> str:
     return raw
 
 
+def _extract_json_object(raw: str) -> str:
+    """Best-effort recovery for a response that's ALMOST pure JSON but has
+    stray prose wrapped around it -- e.g. a one-line preamble ("Sure, here's
+    the correction:") before the object, despite the system prompt saying
+    "Reply with ONLY a JSON object". A real observed bug this guards
+    against: a genuinely edge-case-y request (e.g. correcting a workout/
+    lift field no domain action actually supported yet) occasionally
+    nudged the model into explaining itself instead of committing to pure
+    JSON -- which used to fail json.loads on the WHOLE string and fall back
+    to a generic "didn't catch that" clarification, even for a completely
+    unrelated LATER message in the same conversation, even though a real,
+    valid JSON object was sitting right there in the response the whole
+    time. Finds the first '{' and the LAST '}' and returns just that span;
+    this only strips clean prose wrapped around a clean object, it doesn't
+    attempt to repair genuinely broken/truncated JSON."""
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return raw
+    return raw[start:end + 1]
+
+
 def _safe_json(raw: str) -> dict:
+    stripped = _strip_fences(raw)
     try:
-        return json.loads(_strip_fences(raw))
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_extract_json_object(stripped))
     except json.JSONDecodeError:
         return _clarify_fallback(
             "Sorry, I didn't quite catch that — could you rephrase it, e.g. 'spent 12 on lunch'?"
@@ -1467,7 +1560,12 @@ def _safe_json(raw: str) -> dict:
 def _parse_json_or_none(raw: str):
     """Used by the single-purpose extract_* helpers, which have their own
     domain-appropriate fallback shape rather than a clarification dict."""
+    stripped = _strip_fences(raw)
     try:
-        return json.loads(_strip_fences(raw))
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_extract_json_object(stripped))
     except json.JSONDecodeError:
         return None

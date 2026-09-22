@@ -301,6 +301,45 @@ def test_calorie_calibration_note_present_in_all_three_prompts():
     assert ai.MEAL_CALORIE_CALIBRATION_NOTE in ai.PHOTO_CLASSIFY_SYSTEM_PROMPT
 
 
+# ---------- _safe_json / _parse_json_or_none: tolerating stray prose ----------
+# Regression coverage for a real bad interaction: a genuinely edge-case-y
+# request (correcting a workout/lift field before edit_workout/edit_lift
+# existed) occasionally got a response with a stray sentence of prose
+# wrapped around an otherwise-valid JSON object, which the old strict
+# json.loads(whole_string) failed on entirely -- producing a generic
+# "didn't catch that" clarification even though a real, correctly-shaped
+# JSON object was right there in the response.
+
+def test_safe_json_parses_clean_json():
+    assert ai._safe_json('{"intent": "casual"}') == {"intent": "casual"}
+
+
+def test_safe_json_recovers_json_with_leading_prose():
+    raw = 'Sure, here is the correction:\n{"intent": "casual", "casual_reply": "ok"}'
+    assert ai._safe_json(raw) == {"intent": "casual", "casual_reply": "ok"}
+
+
+def test_safe_json_recovers_json_with_trailing_prose():
+    raw = '{"intent": "casual"}\nLet me know if that looks right!'
+    assert ai._safe_json(raw) == {"intent": "casual"}
+
+
+def test_safe_json_falls_back_to_clarification_on_genuinely_broken_json():
+    raw = "I'm not sure what you mean by that."
+    result = ai._safe_json(raw)
+    assert result["intent"] == "clarification"
+    assert result["clarification_question"] is not None
+
+
+def test_parse_json_or_none_recovers_json_with_stray_prose():
+    raw = 'Here you go: {"activity": "run", "duration_min": 30} -- hope that helps!'
+    assert ai._parse_json_or_none(raw) == {"activity": "run", "duration_min": 30}
+
+
+def test_parse_json_or_none_returns_none_on_genuinely_broken_json():
+    assert ai._parse_json_or_none("not json at all") is None
+
+
 def test_calorie_calibration_note_generalizes_beyond_the_named_dish_list():
     """The old wording only biased a short named-dish list upward; the
     broadened version has to apply to restaurant/hawker/fried food as a
