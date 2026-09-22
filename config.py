@@ -26,9 +26,23 @@ DB_PATH = os.environ.get("DB_PATH", "expenses.db")
 # simple. Use an IANA name, e.g. "America/Los_Angeles", "Asia/Singapore".
 BOT_TIMEZONE = os.environ.get("BOT_TIMEZONE", "Asia/Singapore")
 
-# Claude model used for categorization / natural-language expense parsing.
-# Haiku is fast and cheap, which is plenty for this task.
+# Claude model used for categorization / natural-language expense parsing --
+# i.e. every classify-and-extract call (parse_message, extract_meal,
+# extract_from_photo, categorize, and friends). Haiku is fast and cheap,
+# which is plenty for this kind of structured extraction.
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+# Claude model used for NARRATION instead -- the calls that turn real
+# computed numbers (or an open-ended chat message) into an actual written
+# reply: answer_with_rundown, answer_with_day_stats, answer_with_trends,
+# answer_casually, and friends. Defaults to CLAUDE_MODEL (no behavior
+# change out of the box), but this is deliberately a separate knob: writing
+# a genuinely warm, thoughtful conversational reply is a different job from
+# fast structured extraction, and benefits from a stronger model even
+# though extraction doesn't need one. Set this to a Sonnet-tier model in
+# your .env to make casual conversation and narrated summaries noticeably
+# better without paying Sonnet's cost on every single expense/meal logged.
+CLAUDE_NARRATION_MODEL = os.environ.get("CLAUDE_NARRATION_MODEL", CLAUDE_MODEL)
 
 # Default daily target used the very first time a user interacts with the bot,
 # before they run /settarget.
@@ -58,6 +72,13 @@ BUDGET_ALERT_THRESHOLD = float(os.environ.get("BUDGET_ALERT_THRESHOLD", "0.9"))
 # at any time, so this only controls the proactive daily push.
 MORNING_BRIEFING_HOUR = int(os.environ.get("MORNING_BRIEFING_HOUR", "7"))
 MORNING_BRIEFING_MINUTE = int(os.environ.get("MORNING_BRIEFING_MINUTE", "30"))
+
+# Local time (in BOT_TIMEZONE) the evening "quiet day" nudge checks in --
+# see nudges.py. Deliberately late evening, not late afternoon: the point is
+# to catch a day where genuinely nothing got logged at all, not to nag
+# partway through a normal day.
+EVENING_NUDGE_HOUR = int(os.environ.get("EVENING_NUDGE_HOUR", "20"))
+EVENING_NUDGE_MINUTE = int(os.environ.get("EVENING_NUDGE_MINUTE", "30"))
 
 CATEGORIES = [
     "Food",

@@ -47,6 +47,7 @@ from handlers import handle_text, on_error
 from lifts import loglift_cmd, recentlifts
 from memory import forget_cmd, memory_cmd
 from morning import morning_briefing_tick, morning_cmd
+from nudges import evening_nudge_tick
 from nutrition import handle_photo, logmeal_cmd, recentmeals
 from reminders import addreminder_cmd, donereminder_cmd, reminders_cmd, removereminder_cmd
 from rundown import daystats_cmd, rundown_cmd
@@ -215,12 +216,16 @@ def main():
             config.MORNING_BRIEFING_HOUR, config.MORNING_BRIEFING_MINUTE, tzinfo=ZoneInfo(config.BOT_TIMEZONE)
         )
         app.job_queue.run_daily(morning_briefing_tick, time=briefing_time)
+        nudge_time = datetime.time(
+            config.EVENING_NUDGE_HOUR, config.EVENING_NUDGE_MINUTE, tzinfo=ZoneInfo(config.BOT_TIMEZONE)
+        )
+        app.job_queue.run_daily(evening_nudge_tick, time=nudge_time)
     else:
         logger.warning(
             "JobQueue not available -- install with pip install python-telegram-bot[job-queue] "
-            "to get automatic daily rollover notifications and the morning briefing. Rollover math "
-            "still runs correctly, and /morning still works on demand, whenever a user interacts "
-            "with the bot -- only the proactive daily push needs JobQueue."
+            "to get automatic daily rollover notifications, the morning briefing, and the evening "
+            "nudge. Rollover math still runs correctly, and /morning still works on demand, "
+            "whenever a user interacts with the bot -- only the proactive daily pushes need JobQueue."
         )
 
     logger.info("Bot starting (polling)...")

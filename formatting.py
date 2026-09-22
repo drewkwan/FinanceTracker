@@ -7,6 +7,8 @@ wrapper around a single read -- kept here anyway since every meal-related
 reply uses it and it has nowhere more natural to live.
 """
 
+from datetime import date, timedelta
+
 import config
 import db
 
@@ -138,6 +140,28 @@ def _daily_meal_totals_text(chat_id: int, day: str | None = None) -> str:
     if totals["water_ml"]:
         line += f", {totals['water_ml']:.0f}ml water"
     return line
+
+
+def _weekly_workout_summary_text(chat_id: int, day: str | None = None) -> str:
+    """Real trailing-7-day (inclusive of day) workout count/total burned,
+    appended to a workout confirmation so logging just ONE workout also
+    shows how the week's shaping up -- same "real numbers, deterministic,
+    no AI call" discipline as _daily_meal_totals_text/_daily_calorie_balance_text.
+    day is passed explicitly for a backdated workout (see
+    _daily_meal_totals_text's docstring for the same reasoning), so the
+    window is centered on the day actually logged onto, not necessarily
+    today."""
+    day = day or db.today_str()
+    window_start = (date.fromisoformat(day) - timedelta(days=6)).isoformat()
+    window_end = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    workouts = db.get_workouts_in_range(chat_id, window_start, window_end)
+    # The just-logged workout is always included (the window covers `day`),
+    # so this is never actually empty -- 1 means it's the only one so far.
+    if len(workouts) == 1:
+        return "First workout logged this week."
+    total_burned = sum(w["calories_burned"] or 0 for w in workouts)
+    burned_tag = f", ~{total_burned:.0f} kcal burned" if total_burned else ""
+    return f"This week: {len(workouts)} workouts logged{burned_tag}"
 
 
 def _daily_calorie_balance_text(chat_id: int, day: str | None = None) -> str:

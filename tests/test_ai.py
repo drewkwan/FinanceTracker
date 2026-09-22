@@ -348,3 +348,103 @@ def test_calorie_calibration_note_generalizes_beyond_the_named_dish_list():
     assert "restaurant" in note.lower()
     assert "hawker" in note.lower()
     assert "mala" in note.lower()  # the original named examples are kept, not dropped
+
+
+# ---------- narration model tier: casual conversation and narration calls ----------
+# CLAUDE_NARRATION_MODEL exists so genuinely writing (conversation, cross-domain
+# narration) can use a stronger model than fast structured extraction needs --
+# these tests lock in that extraction calls stay on CLAUDE_MODEL while narration
+# calls move to CLAUDE_NARRATION_MODEL, even when a test deliberately sets them
+# to two different values (the default has them equal, which wouldn't catch a
+# call site accidentally left on the wrong constant).
+
+class _RecordingFakeClient:
+    """Like _FakeClient, but also records every kwargs dict passed to
+    create() so a test can assert on model/messages without re-deriving
+    them from the response alone."""
+
+    def __init__(self, create_return):
+        self._create_return = create_return
+        self.messages = self
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self._create_return, Exception):
+            raise self._create_return
+        return _FakeResponse(self._create_return)
+
+
+def _mock_recording_client(monkeypatch, create_return):
+    fake = _RecordingFakeClient(create_return)
+    monkeypatch.setattr(ai, "_get_client", lambda: fake)
+    return fake
+
+
+def test_answer_casually_uses_the_narration_model_not_the_extraction_one(monkeypatch):
+    """The whole point of splitting casual conversation out of parse_message:
+    it should use CLAUDE_NARRATION_MODEL, not CLAUDE_MODEL -- set them to
+    different values here so the default (where they happen to be equal)
+    can't hide a call site left on the wrong constant."""
+    monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
+    monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")
+    fake = _mock_recording_client(monkeypatch, "Hey! Good to hear from you.")
+    reply = ai.answer_casually("hey what's up", [], [], {})
+    assert reply == "Hey! Good to hear from you."
+    assert fake.calls[0]["model"] == "narration-model-x"
+
+
+def test_answer_casually_includes_conversation_history_memory_and_snapshot(monkeypatch):
+    fake = _mock_recording_client(monkeypatch, "noted")
+    recent_messages = [{"role": "user", "content": "I hit a new PR on squats today"}]
+    memory_list = [{"label": "gym", "category": "plan", "content": "Fitness First Bugis Tue/Thu"}]
+    today_snapshot = {"balance": {"available_today": 42.0}, "today": {"meals": {"count": 1}}}
+    ai.answer_casually("nice right?", recent_messages, memory_list, today_snapshot)
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "new PR on squats" in sent
+    assert "Fitness First Bugis" in sent
+    assert "42.0" in sent
+
+
+def test_answer_casually_system_prompt_forbids_claiming_actions():
+    """Guards the guardrail itself -- this call has no way to write to the
+    DB, so its own system prompt must keep telling the model never to claim
+    it did (the exact real bug this discipline exists for: a casual reply
+    once falsely claimed to have "corrected" a meal entry that was never
+    actually edited)."""
+    assert "NEVER claim" in ai.CASUAL_SYSTEM_PROMPT
+    assert "performed" in ai.CASUAL_SYSTEM_PROMPT
+
+
+def test_parse_message_extraction_stays_on_claude_model(monkeypatch):
+    """Regression guard for the model-tier split: parse_message is pure
+    classification/extraction and must stay on CLAUDE_MODEL even when
+    CLAUDE_NARRATION_MODEL is set to something else."""
+    monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
+    monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")
+    payload = {
+        "intent": "casual", "expenses": None, "target_expense_id": None, "correction_action": None,
+        "days_ago": None, "new_currency": None, "new_amount": None, "new_description": None,
+        "new_category": None, "clarification_question": None, "casual_reply": "hi",
+    }
+    fake = _mock_recording_client(monkeypatch, json.dumps(payload))
+    ai.parse_message("hey", [])
+    assert fake.calls[0]["model"] == "extraction-model-y"
+
+
+def test_answer_with_rundown_uses_the_narration_model(monkeypatch):
+    monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
+    monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")
+    fake = _mock_recording_client(monkeypatch, "You're doing fine this week.")
+    ai.answer_with_rundown({"window_days": 7, "balance": {}, "meals": {"count": 0},
+                             "workouts": {"count": 0}, "vitals": {"checkins": 0}})
+    assert fake.calls[0]["model"] == "narration-model-x"
+
+
+def test_answer_with_day_stats_uses_the_narration_model(monkeypatch):
+    monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
+    monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")
+    fake = _mock_recording_client(monkeypatch, "Quiet day.")
+    ai.answer_with_day_stats({"day": db.today_str(), "is_today": True, "meals": {"count": 0},
+                               "workouts": {"count": 0}, "net_calories": None, "vitals": None})
+    assert fake.calls[0]["model"] == "narration-model-x"

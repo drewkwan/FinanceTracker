@@ -19,15 +19,15 @@ import fx
 from access import _reject_if_not_allowed
 from correction import CORRECTION_UNDO_PHRASES, LAST_CORRECTION_KEY, _handle_correction, _revert_last_correction
 from finance import _balance_text, _recent_text
-from fitness import _force_log_workout_and_reply
-from formatting import _money, _status_text, _workout_line
+from fitness import _force_log_workout_and_reply, _reply_workout_logged
+from formatting import _money, _status_text
 from lifts import _log_lifts_and_reply, _recent_lifts_for_ai
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply, _target_date_from_days_ago
 from events import _add_events_and_reply, _events_text
 from reminders import _add_reminder_and_reply, _reminders_text
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, PENDING_KEY, _reply, _send_alert_if_needed
-from rundown import _day_stats_reply_text, _rundown_reply_text
+from rundown import _day_stats_payload, _day_stats_reply_text, _rundown_reply_text
 from tasks import _log_tasks_and_reply, _recent_tasks_for_ai, _tasks_text
 from vitals import _log_vitals_and_reply
 
@@ -79,6 +79,31 @@ def _recent_vitals_for_ai(chat_id: int) -> list:
 def _recent_messages_for_ai(chat_id: int) -> list:
     rows = db.get_recent_messages(chat_id, limit=RECENT_MESSAGES_FOR_AI)
     return [{"role": r["role"], "content": r["content"]} for r in rows]
+
+
+async def _casual_reply_text(chat_id: int, message: str, recent_messages: list, memory_list: list,
+                              fallback: str | None) -> str:
+    """Real conversational reply for the 'casual' intent -- see
+    ai.answer_casually's docstring for why this is its own dedicated call
+    rather than reusing parse_message's casual_reply field. today_snapshot
+    reuses the exact same real, deterministically-computed figures day_stats
+    already trusts (db.get_status + rundown._day_stats_payload for today) --
+    one source of "how's today going", not a second copy that could drift.
+    Falls back to parse_message's own casual_reply field (or a generic
+    line) if the dedicated call itself fails, same discipline as rundown/
+    day_stats falling back to deterministic text on an AI-call exception."""
+    today_snapshot = {
+        "balance": db.get_status(chat_id),
+        "today": _day_stats_payload(chat_id, db.today_str()),
+    }
+    try:
+        return ai.answer_casually(message, recent_messages, memory_list, today_snapshot)
+    except Exception:
+        logger.exception("answer_casually failed, falling back to parse_message's casual_reply")
+        return fallback or (
+            "Not sure what to do with that. Use /log, /claim, /logmeal, /logworkout, /logvitals, /balance, "
+            "/summary, /recent, or /help."
+        )
 
 
 def _recent_events_for_ai(chat_id: int) -> list:
@@ -245,7 +270,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      parsed.get("distance_km"), parsed.get("workout_notes"),
                                      workout_date=workout_date)
         row = db.get_workout(chat_id, workout_id)
-        await _reply(update, chat_id, f"Logged: {_workout_line(row)}")
+        # _reply_workout_logged, not a bare inline reply -- one implementation
+        # of "what a logged workout's confirmation says" shared with /logworkout
+        # and photo logging (see finance._balance_text's docstring for the same
+        # reasoning), so the weekly-summary line (and the calorie-balance line,
+        # on the rare natural-language message that does report calories_burned)
+        # shows up here too instead of only on the command/photo paths.
+        await _reply_workout_logged(update, chat_id, row, workout_date)
         return
 
     if intent == "log_lift":
@@ -334,15 +365,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, chat_id, _memory_text(chat_id))
         return
 
+    if intent == "casual":
+        # Genuinely open-ended conversation -- a dedicated call with full
+        # room to actually engage, not parse_message's own casual_reply
+        # field (kept only as this call's own fallback -- see
+        # _casual_reply_text's docstring).
+        context.chat_data.pop(PENDING_KEY, None)
+        reply = await _casual_reply_text(chat_id, merged_text, recent_messages, memory_list,
+                                          parsed.get("casual_reply"))
+        await _reply(update, chat_id, reply)
+        return
+
     if intent != "log_expense":
-        # "casual", or anything the model didn't tag cleanly -- never silent.
-        if pending:
-            context.chat_data.pop(PENDING_KEY, None)
-        reply = parsed.get("casual_reply") or (
+        # A real classification gap -- the model didn't tag this cleanly as
+        # ANY known intent, not even "casual". This isn't a conversation to
+        # engage with, it's a "I don't know what you want" case, so point
+        # at the real command surface instead of trying to converse about it.
+        context.chat_data.pop(PENDING_KEY, None)
+        await _reply(
+            update, chat_id,
             "Not sure what to do with that. Use /log, /claim, /logmeal, /logworkout, /logvitals, /balance, "
             "/summary, /recent, or /help."
         )
-        await _reply(update, chat_id, reply)
         return
 
     context.chat_data.pop(PENDING_KEY, None)

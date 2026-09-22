@@ -182,6 +182,58 @@ def test_natural_language_log_lift_multiple_exercises_in_one_message(monkeypatch
     assert "pull-ups" in reply and "v-bar row" in reply and "lat pulldown" in reply
 
 
+# ---------- richer log confirmations: same-exercise comparison ----------
+
+def test_last_lift_text_compares_against_most_recent_same_exercise():
+    db.add_lift(CHAT, "pull-ups", "AF Wheelock",
+                [{"reps": 10, "load": None}, {"reps": 10, "load": None}, {"reps": 8, "load": None}])
+    new_id = db.add_lift(CHAT, "pull-ups", "AF Wheelock", [{"reps": 12, "load": None}] * 3)
+    text = bot._last_lift_text(CHAT, "pull-ups", exclude_id=new_id)
+    assert text is not None
+    assert "Last time" in text
+    assert "10" in text  # the PRIOR session's reps, not the one just logged
+
+
+def test_last_lift_text_is_case_insensitive_and_ignores_other_exercises():
+    db.add_lift(CHAT, "V-Bar Row", "AF Wheelock", [{"reps": 8, "load": "35kg"}] * 3)
+    other_id = db.add_lift(CHAT, "lat pulldown", "AF Wheelock", [{"reps": 8, "load": "70kg"}] * 3)
+    assert bot._last_lift_text(CHAT, "lat pulldown", exclude_id=other_id) is None  # no prior lat pulldown
+    new_id = db.add_lift(CHAT, "v-bar row", "AF Wheelock", [{"reps": 8, "load": "40kg"}] * 3)
+    text = bot._last_lift_text(CHAT, "v-bar row", exclude_id=new_id)
+    assert text is not None and "35kg" in text  # matched "V-Bar Row" case-insensitively
+
+
+def test_last_lift_text_returns_none_for_a_brand_new_exercise():
+    new_id = db.add_lift(CHAT, "hack squat", "AF Wheelock", [{"reps": 10, "load": "60kg"}] * 3)
+    assert bot._last_lift_text(CHAT, "hack squat", exclude_id=new_id) is None
+
+
+def test_natural_language_log_lift_shows_comparison_to_last_session(monkeypatch):
+    """End-to-end: a second pull-ups session, logged naturally, should show
+    the prior session's sets alongside the fresh confirmation -- the kind
+    of thing a real training partner would notice, not just 'Logged'."""
+    db.get_or_create_user(CHAT)
+    db.add_lift(CHAT, "pull-ups", "AF Wheelock", [{"reps": 10, "load": None}] * 3, effort="tough")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "log_lift",
+            "lifts": [{"exercise": "pull-ups", "location": "AF Wheelock",
+                       "sets": [{"reps": 12, "load": None}] * 3, "effort": "felt easier",
+                       "context_notes": None, "logged_days_ago": None}],
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="pull-ups 12x3 at wheelock, felt easier")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "Logged:" in reply
+    assert "Last time" in reply
+
+
 def test_loglift_command_uses_extract_lift(monkeypatch):
     db.get_or_create_user(CHAT)
     monkeypatch.setattr(bot.ai, "extract_lift", lambda desc: {

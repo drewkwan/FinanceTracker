@@ -113,6 +113,7 @@ from formatting import (
     _status_text,
     _task_line,
     _vitals_line,
+    _weekly_workout_summary_text,
     _workout_line,
 )
 from handlers import (
@@ -120,11 +121,21 @@ from handlers import (
     PENDING_KEY,
     RECENT_EXPENSES_FOR_AI,
     RECENT_MESSAGES_FOR_AI,
+    _casual_reply_text,
     handle_text,
     on_error,
 )
+from lifts import (
+    _last_lift_text,
+    _log_lift_and_reply,
+    _log_lifts_and_reply,
+    _recent_lifts_for_ai,
+    loglift_cmd,
+    recentlifts,
+)
 from memory import _memory_for_ai, _memory_text, forget_cmd, memory_cmd
 from morning import _morning_briefing_payload, _morning_briefing_text, morning_briefing_tick, morning_cmd
+from nudges import evening_nudge_tick
 from nutrition import (
     _log_meal_and_reply,
     _log_meals_and_reply,
@@ -165,7 +176,7 @@ from tasks import (
     done_cmd,
     tasks_cmd,
 )
-from vitals import _log_vitals_and_reply, logvitals_cmd, recentvitals
+from vitals import _log_vitals_and_reply, _vitals_trend_text, logvitals_cmd, recentvitals
 
 # This module no longer configures logging itself -- app.py does, since
 # it's the actual entrypoint (import bot -> import app runs it already).

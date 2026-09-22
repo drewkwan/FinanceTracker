@@ -649,6 +649,50 @@ def test_natural_language_log_workout(monkeypatch):
     assert db.get_recent_workouts(CHAT)[0]["activity"] == "tennis"
 
 
+# ---------- richer log confirmations: weekly workout summary ----------
+
+def test_weekly_workout_summary_text_says_first_workout_when_alone():
+    db.add_workout(CHAT, "tennis", 60)
+    assert bot._weekly_workout_summary_text(CHAT) == "First workout logged this week."
+
+
+def test_weekly_workout_summary_text_counts_and_sums_calories_burned():
+    db.add_workout(CHAT, "tennis", 60)
+    db.add_workout(CHAT, "run", 30, calories_burned=300)
+    text = bot._weekly_workout_summary_text(CHAT)
+    assert "2 workouts logged" in text
+    assert "300" in text
+
+
+def test_weekly_workout_summary_text_excludes_workouts_outside_the_7_day_window():
+    old_date = (dt.date.today() - dt.timedelta(days=10)).isoformat()
+    db.add_workout(CHAT, "old run", 30, workout_date=old_date)
+    db.add_workout(CHAT, "tennis", 60)
+    assert bot._weekly_workout_summary_text(CHAT) == "First workout logged this week."
+
+
+def test_natural_language_log_workout_shows_weekly_summary(monkeypatch):
+    """The natural-language path (the one actually used day to day, not just
+    /logworkout or photo logging) must also get the weekly summary -- a real
+    gap: handlers.py used to build its own bare 'Logged: ...' reply inline
+    instead of going through fitness._reply_workout_logged."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
+        return {"intent": "log_workout", "activity": "tennis", "duration_min": 60,
+                "distance_km": None, "workout_notes": None,
+                "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="played tennis for an hour")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "Logged:" in reply
+    assert "First workout logged this week." in reply
+
+
 def test_natural_language_log_workout_backdates_with_logged_days_ago(monkeypatch):
     """Regression test for a real reported bug: 'last night I also went for
     a run' (or any natural-language log with no photo involved) always

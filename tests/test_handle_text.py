@@ -583,3 +583,92 @@ def test_adjustbalance_command_rejects_non_numeric_input():
     _run(bot.adjustbalance_cmd(update, context))
     assert db.get_or_create_user(CHAT)["balance"] == 0.0
     assert "doesn't look like a number" in update.message.replies[-1]
+
+
+# ---------- casual intent: dedicated conversational reply ----------
+# See ai.answer_casually's docstring -- "casual" now gets a real, dedicated
+# call with full context, instead of reusing parse_message's own
+# casual_reply field. These tests lock in the routing (handlers._casual_reply_text)
+# without making a real Claude call.
+
+def _casual_parse_response(casual_reply="hey!"):
+    return {"intent": "casual", "clarification_question": None, "casual_reply": casual_reply,
+            **_no_op_extra_fields()}
+
+
+def test_casual_intent_uses_the_dedicated_answer_casually_call(monkeypatch):
+    db.get_or_create_user(CHAT)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
+        return _casual_parse_response(casual_reply="fallback text, should not be used")
+
+    captured = {}
+
+    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot):
+        captured["message"] = message
+        captured["today_snapshot"] = today_snapshot
+        return "Hey! Doing well, how about you?"
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    monkeypatch.setattr(bot.ai, "answer_casually", fake_answer_casually)
+    update = FakeUpdate(CHAT, "hey how's it going")
+    _run(bot.handle_text(update, context))
+
+    assert update.message.replies[-1] == "Hey! Doing well, how about you?"
+    assert captured["message"] == "hey how's it going"
+    # today_snapshot must carry real, deterministically-computed figures --
+    # not something the dedicated call has to guess at itself.
+    assert "balance" in captured["today_snapshot"] and "today" in captured["today_snapshot"]
+    assert "daily_target" in captured["today_snapshot"]["balance"]
+
+
+def test_casual_intent_falls_back_to_parsed_casual_reply_if_dedicated_call_fails(monkeypatch):
+    """Same discipline as rundown/day_stats: if the dedicated narration call
+    itself fails, fall back to a deterministic-enough alternative rather
+    than going silent -- here, parse_message's own casual_reply field."""
+    db.get_or_create_user(CHAT)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
+        return _casual_parse_response(casual_reply="Hey! (fallback)")
+
+    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot):
+        raise RuntimeError("API blip")
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    monkeypatch.setattr(bot.ai, "answer_casually", fake_answer_casually)
+    update = FakeUpdate(CHAT, "hey how's it going")
+    _run(bot.handle_text(update, context))
+    assert update.message.replies[-1] == "Hey! (fallback)"
+
+
+def test_genuinely_unmatched_intent_gets_generic_command_menu_not_casual_call(monkeypatch):
+    """An intent the model didn't tag as ANY known value (not even 'casual')
+    is a real classification gap, not conversation -- it must NOT reach the
+    dedicated answer_casually call, and must still get the generic
+    command-menu fallback so the user is never left with silence."""
+    db.get_or_create_user(CHAT)
+    context = FakeContext()
+    called = []
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
+        return {"intent": "something_unrecognized", "clarification_question": None, "casual_reply": None,
+                **_no_op_extra_fields()}
+
+    def fake_answer_casually(*args, **kwargs):
+        called.append(True)
+        return "should not be reached"
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    monkeypatch.setattr(bot.ai, "answer_casually", fake_answer_casually)
+    update = FakeUpdate(CHAT, "asdkfjasldkfj")
+    _run(bot.handle_text(update, context))
+    assert not called
+    assert "Not sure what to do with that" in update.message.replies[-1]

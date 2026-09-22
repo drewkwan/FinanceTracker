@@ -38,6 +38,11 @@ Entry points:
   - answer_with_data(question, context_rows): used for on-demand analytics,
     turns raw category totals into a short natural-language answer.
   - answer_with_trends(period, payload): the /summary trend narrative.
+  - answer_casually(message, recent_messages, memory_list, today_snapshot): the
+    dedicated call for the "casual" intent's actual reply -- see its own
+    docstring for why this is a separate call from parse_message rather than
+    reusing that call's casual_reply field (which now only exists as a
+    fallback if this call itself fails).
 
 The model is instructed to always return strict JSON so the bot can parse it
 reliably without brittle regex. All date arithmetic and all "did this
@@ -361,8 +366,10 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     "logistics", or null if nothing obvious fits),
 
   "clarification_question": string or null (clarification only -- short and friendly),
-  "casual_reply": string or null (casual only -- short, warm, in-character reply, drawing on conversation
-    history and memory content when relevant so it reads as continuous rather than stateless)
+  "casual_reply": string or null (casual only -- a FALLBACK, used only if the dedicated answer_casually call
+    can't run for some reason; still write a genuine short, warm, in-character reply here, not a stub, but
+    don't spend excess effort polishing it -- the real conversational reply is generated separately, with its
+    own dedicated call and full context, and normally replaces this entirely)
 }}
 
 Deciding the intent:
@@ -1305,7 +1312,7 @@ def answer_with_data(question: str, rows: list) -> str:
     client = _get_client()
     data_str = json.dumps(rows)
     resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
+        model=config.CLAUDE_NARRATION_MODEL,
         max_tokens=400,
         system=(
             "You are a personal finance assistant. You're given category spending totals as JSON "
@@ -1378,7 +1385,7 @@ def answer_with_trends(period: str, payload: dict) -> str:
     client = _get_client()
     data_str = json.dumps(payload)
     resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
+        model=config.CLAUDE_NARRATION_MODEL,
         max_tokens=600,
         system=TRENDS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Period: {period}\nData: {data_str}"}],
@@ -1399,7 +1406,7 @@ def answer_with_rundown(payload: dict) -> str:
     client = _get_client()
     data_str = json.dumps(payload)
     resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
+        model=config.CLAUDE_NARRATION_MODEL,
         max_tokens=450,
         system=(
             "You are Morrow, a personal companion, giving a short cross-domain check-in when asked "
@@ -1437,7 +1444,7 @@ def answer_with_day_stats(payload: dict) -> str:
     client = _get_client()
     data_str = json.dumps(payload)
     resp = client.messages.create(
-        model=config.CLAUDE_MODEL,
+        model=config.CLAUDE_NARRATION_MODEL,
         max_tokens=350,
         system=(
             "You are Morrow, a personal companion, answering a question about ONE specific day (e.g. "
@@ -1457,6 +1464,102 @@ def answer_with_day_stats(payload: dict) -> str:
             f"checked would answer -- not a report. {TELEGRAM_FORMATTING_NOTE}"
         ),
         messages=[{"role": "user", "content": data_str}],
+    )
+    return resp.content[0].text.strip()
+
+
+CASUAL_SYSTEM_PROMPT = f"""You are Morrow, the person's personal companion and tracker, having an ordinary \
+back-and-forth conversation with them on Telegram -- not extracting data, not filling out a form. This is a \
+dedicated call just for this: nothing here needs to come back as JSON, and nothing you write commits to any \
+action, so there's no schema competing for your attention -- just write the actual reply.
+
+Write like an actual thoughtful companion who's genuinely listening, the way a good back-and-forth with a \
+person (or a genuinely attentive ChatGPT thread) reads -- not a bot economizing on words, and not a command \
+menu. A couple of sentences is a fine default for something small; go longer, with real substance, whenever \
+the message actually calls for it -- a real question deserves a real answer, not a deflection toward a \
+command. Don't pad for its own sake (a genuine "thanks" still just gets a genuine short reply), but when \
+there's something real to engage with, engage with it: react to the specific thing they said, add a thought \
+or a follow-up where one actually fits, ask something back if it's natural to, instead of just closing the \
+loop. Thoughtful beats terse, and a real opinion beats a hedge -- when the numbers or the conversation \
+actually support one, say it plainly ("that's a solid week" or "that's higher than your usual Tuesday") \
+instead of turning it into a question back at them. Match the person's own register instead of defaulting to \
+neutral-polite -- when they're casual or sweary, talk back the same way; that's what makes it read as an \
+actual companion present in the conversation, not a bot performing politeness at them.
+
+You're given three things:
+- The recent conversation history (oldest first, "user"/"morrow" turns) -- use it to resolve pronouns and \
+follow-ups ("that", "it", "the one I mentioned") and to keep this reply in the actual flow of the \
+conversation instead of treating every message as a fresh start.
+- The user's full durable memory list (each with a "label", "category", and "content" -- standing goals, \
+plans, preferences they've told you to remember). Read the content, not just the labels: if the message \
+references something covered by an existing memory (e.g. mentions a gym by name and a memory holds that \
+gym's plan), use that content directly instead of asking the user to repeat it. This is the ONLY source of \
+durable facts -- never invent a plan or preference that isn't actually in this list.
+- A "today_snapshot": real, deterministically-computed numbers for right now -- today's spending balance/ \
+target/streak, and today's meals/workouts/vitals so far (counts, actual items, calorie totals, net calories, \
+the latest weight/sleep/knee-pain reading if logged today). This is here so you can actually converse with \
+real knowledge of how today's going ("you're already over target today, but barely" or "nothing logged yet \
+today, quiet one so far") instead of talking in a vacuum -- use it when it's actually relevant to what they \
+said, don't force it into every reply. Every number in it is already correct and final; restate it, never \
+recompute, re-estimate, or "correct" it.
+
+The bot's real command surface (never deny something on this list, and never invent a capability that isn't \
+on it): {COMMAND_LIST}
+
+If they ask about a capability the bot has, point them at the real command or say you can already do it \
+inline. If they ask for something the bot genuinely can't do (e.g. a specific past day's balance -- /balance \
+only ever reflects today), say that plainly and suggest the closest real alternative instead of inventing a \
+capability that doesn't exist.
+
+NEVER claim OR promise that you performed, edited, deleted, logged, remembered, or will look into/fix/note/ \
+save anything -- not "I've removed it", not "I'll take care of that", not "noted, I'll remember that". This \
+call only talks and has no way to follow up later or write anything down; any phrasing implying action past, \
+present, or future is misleading. If the message actually needs a real action taken (logging something, \
+correcting something, remembering something), say so plainly and tell them to just say it as its own \
+message (or use the matching command) and you'll do it for real -- don't pretend to have already done it here.
+
+{TELEGRAM_FORMATTING_NOTE}"""
+
+
+def answer_casually(message: str, recent_messages: list | None = None, memory_list: list | None = None,
+                     today_snapshot: dict | None = None) -> str:
+    """Dedicated call for the 'casual' intent -- genuinely open-ended
+    conversation (small talk, catching up, venting, asking for advice, a
+    question answerable from context/memory), pulled OUT of parse_message's
+    single mega-extraction call into its own focused call, the same
+    "narration gets its own call" discipline as answer_with_rundown/
+    answer_with_day_stats. The reasoning: parse_message already has to
+    correctly classify+extract across ~20 structured fields in one
+    completion -- asking it to ALSO write a genuinely warm, engaged
+    conversational reply in that same JSON blob means the reply is
+    competing for the model's attention with a giant extraction schema, and
+    in practice reads flatter than a call with nothing else to do. Uses
+    CLAUDE_NARRATION_MODEL (see config.py) rather than CLAUDE_MODEL --
+    actually conversing well benefits from a stronger model even though
+    fast structured extraction doesn't need one.
+
+    today_snapshot: {{"balance": <db.get_status(chat_id) dict>, "today":
+    <rundown._day_stats_payload(chat_id, today) dict>}} -- real numbers,
+    never estimated, same discipline as every other narration call here.
+    Never raises -- callers should catch and fall back to parse_message's
+    own casual_reply field (or a generic line) the same way rundown/
+    day_stats fall back to their own deterministic text on failure."""
+    client = _get_client()
+    recent_messages = recent_messages or []
+    memory_list = memory_list or []
+    today_snapshot = today_snapshot or {}
+    user_content = (
+        f"{_today_context()}\n\n"
+        f"Recent conversation history (oldest first):\n{json.dumps(recent_messages)}\n\n"
+        f"Durable memory:\n{json.dumps(memory_list)}\n\n"
+        f"today_snapshot:\n{json.dumps(today_snapshot)}\n\n"
+        f"Message: {message}"
+    )
+    resp = client.messages.create(
+        model=config.CLAUDE_NARRATION_MODEL,
+        max_tokens=600,
+        system=CASUAL_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
     )
     return resp.content[0].text.strip()
 

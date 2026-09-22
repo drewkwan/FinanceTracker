@@ -13,18 +13,52 @@ from formatting import _vitals_line
 from replies import _reply
 
 
+def _vitals_trend_text(chat_id: int, row: dict) -> str | None:
+    """Compares this check-in to the most recent PRIOR one (weight/sleep
+    deltas) -- real DB read, no AI, same discipline as
+    lifts._last_lift_text. Only reports a delta for a field BOTH check-ins
+    actually have -- a partial check-in (e.g. weight only) never gets a
+    misleading comparison against a field it didn't report, and a
+    first-ever check-in (nothing prior) returns None rather than an empty
+    line. get_recent_vitals is newest-first, so the just-inserted row
+    itself is normally the first result -- skip it by id and take the next."""
+    for prev in db.get_recent_vitals(chat_id, limit=10):
+        if prev["id"] == row["id"]:
+            continue
+        bits = []
+        if row.get("weight_kg") is not None and prev.get("weight_kg") is not None:
+            delta = row["weight_kg"] - prev["weight_kg"]
+            sign = "+" if delta > 0 else ""
+            bits.append(f"weight {sign}{delta:.1f}kg vs last ({prev['vitals_date']})")
+        if row.get("sleep_hours") is not None and prev.get("sleep_hours") is not None:
+            delta = row["sleep_hours"] - prev["sleep_hours"]
+            sign = "+" if delta > 0 else ""
+            bits.append(f"sleep {sign}{delta:.1f}h vs last")
+        if not bits:
+            return None
+        return "Since last check-in: " + ", ".join(bits)
+    return None
+
+
 async def _log_vitals_and_reply(update: Update, chat_id: int, data: dict, vitals_date: str | None = None):
     """vitals_date lets the natural-language log_vitals intent backdate a
     check-in the same way meals/workouts/expenses now can -- see ai.py's
     logged_days_ago rule and handlers.py's use of
     nutrition._target_date_from_days_ago for how it's computed. _vitals_line
     already always shows the date, so a backdated entry is visible without
-    any extra tagging here."""
+    any extra tagging here. Also shows a real trend against the previous
+    check-in when there's a comparable one (see _vitals_trend_text) -- a
+    bare "logged" confirmation was the whole reply before, even though the
+    point of tracking weight/sleep over time is seeing it move."""
     vitals_id = db.add_vitals(chat_id, data.get("weight_kg"), data.get("sleep_hours"),
                                data.get("knee_pain"), data.get("notes") or data.get("vitals_notes"),
                                vitals_date=vitals_date)
     row = db.get_vitals(chat_id, vitals_id)
-    await _reply(update, chat_id, f"Logged: {_vitals_line(row)}")
+    reply = f"Logged: {_vitals_line(row)}"
+    trend = _vitals_trend_text(chat_id, row)
+    if trend:
+        reply += f"\n{trend}"
+    await _reply(update, chat_id, reply)
 
 
 async def logvitals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

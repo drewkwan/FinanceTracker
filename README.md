@@ -109,6 +109,23 @@ natural-language pattern.
   logged with `calories_burned` set (typically from a fitness app/wearable
   screenshot — see above), the reply also shows that day's running "calories
   in vs calories burned" balance, not just the number in isolation.
+- **Every workout confirmation also shows the trailing 7-day count** (and
+  total calories burned, when reported) — "This week: 3 workouts logged,
+  ~1,200 kcal burned" — so logging one workout also shows how the week's
+  shaping up, not just a bare "Logged: ...". All real, deterministically
+  computed from the database, no AI call involved (same discipline as the
+  daily meal totals above) — this applies to `/logworkout`, photo logging,
+  and the natural-language path alike.
+- **A structured lift shows a same-exercise comparison when there's a prior
+  one to compare against** — "Last time (3 days ago): 30kg x8, 30kg x8,
+  32kg x6" alongside the fresh confirmation, matched by exercise name
+  case-insensitively. A brand-new exercise, or the first time it's ever been
+  logged, just gets the plain confirmation — there's nothing to compare yet.
+- **A vitals check-in shows the delta against the previous one** — "Since
+  last check-in: weight -0.4kg vs last (2024-01-03), sleep +1.0h" — only for
+  fields both check-ins actually reported, so a partial check-in never gets
+  a misleading comparison against something it didn't mention. A first-ever
+  check-in gets no trend line, since there's nothing prior yet.
 - **Two photos of the same fitness-app data don't get logged as two
   workouts.** A real bad interaction: two screenshots of the same day's
   stats (a Move-goal screen and an Activity-summary screen) reported the
@@ -294,6 +311,59 @@ also spans multiple domains, e.g. "how'd I eat and train yesterday") is
 `day_stats`; an open-ended, no-particular-day, multi-day question ("how's
 my week been") is `rundown`.
 
+## How casual conversation works
+
+Anything that isn't logging, correcting, checking a real number, or
+remembering something durable — small talk, catching up, venting, asking
+for advice, or a specific question answerable from context/memory — gets
+classified as the `casual` intent and answered by a **dedicated Claude
+call** (`ai.answer_casually`), not by `parse_message` itself.
+
+This is a deliberate split, not just an implementation detail. Every other
+intent (`log_meal`, `correction`, `day_stats`, …) needs `parse_message` to
+correctly classify the message AND extract a pile of structured fields, all
+in one JSON-constrained completion — there's no room in that same call to
+also write a genuinely warm, engaged conversational reply without the two
+jobs competing for the model's attention. `answer_casually` has nothing to
+extract and nothing to return but plain text, so it gets its own call, with
+real room to actually converse, fed:
+
+- the rolling conversation history and full durable memory (the same two
+  things `parse_message` already sees), so it stays in the actual thread
+  instead of treating every message as a fresh start, and
+- a `today_snapshot` — today's real balance/streak and today's real
+  meals/workouts/vitals so far (the same deterministically-computed figures
+  `day_stats` trusts), so it can actually converse with knowledge of how
+  today's going ("nothing logged yet today, quiet one so far") instead of
+  talking in a vacuum, without ever recomputing or guessing at a number
+  itself.
+
+It also uses a separate model setting, `CLAUDE_NARRATION_MODEL` (an
+optional env var, defaults to whatever `CLAUDE_MODEL` is set to — see
+`config.py`) — writing a good conversational reply benefits from a
+stronger model even though fast structured extraction doesn't need one,
+and this way you only pay for that on the calls that actually need it. Set
+it to a Sonnet-tier model in your `.env` for noticeably better conversation
+and narration without paying that cost on every single expense/meal
+logged. The same setting is also used for `/rundown` and `/daystats`'s
+narration, and `/summary`'s trend write-up.
+
+If the dedicated call itself fails for some reason (API hiccup, rate
+limit), Morrow falls back to `parse_message`'s own `casual_reply` field —
+the same "never go silent" discipline as `/rundown`/`/daystats` falling
+back to a plain deterministic rendering.
+
+Same guardrail as always: this call only talks, and can't write anything to
+the database or queue up a future action — it's told explicitly never to
+claim it logged, corrected, remembered, or will "look into" anything, and
+to say plainly that you should just say the thing as its own message (or
+use the matching command) if you actually want it done.
+
+If the model doesn't classify a message as *any* known intent — not even
+`casual` — that's treated as a real gap, not conversation: you get the
+plain command-menu fallback instead, so a genuine misclassification isn't
+quietly answered as if it were small talk.
+
 ## How the morning briefing works
 
 Every day at a fixed local time (`MORNING_BRIEFING_HOUR`/`MORNING_BRIEFING_MINUTE`
@@ -322,6 +392,23 @@ hiccup.
 If `python-telegram-bot`'s job-queue extra isn't installed, the automatic
 daily push won't fire (same caveat as the hourly rollover check — see the
 startup log warning), but `/morning` still works on demand regardless.
+
+## How the evening nudge works
+
+Every day at a fixed local time (`EVENING_NUDGE_HOUR`/`EVENING_NUDGE_MINUTE`
+in `BOT_TIMEZONE`, default 8:30pm), Morrow checks whether *literally
+nothing* has been logged yet today — no meal, no workout, no vitals
+check-in (reusing the exact same real counts `/daystats` trusts, see "How
+day stats works" above) — and if so, sends one gentle "quiet day so far"
+message.
+
+This is deliberately conservative: it only fires on a genuinely empty day,
+never for a partial one (a workout logged but no meals yet is completely
+normal and not worth interrupting for). The point is catching the one case
+that's actually worth a nudge — a day nothing got logged at all — not
+nagging about any specific domain. No AI call is involved (same reasoning
+as the morning briefing), and the same per-chat try/except discipline
+applies, so one chat's failure never blocks the nudge reaching anyone else.
 
 ## How to-dos work
 

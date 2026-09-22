@@ -11,7 +11,7 @@ from telegram.ext import ContextTypes
 import ai
 import db
 from access import _reject_if_not_allowed
-from formatting import _daily_calorie_balance_text, _workout_line
+from formatting import _daily_calorie_balance_text, _weekly_workout_summary_text, _workout_line
 from replies import PENDING_DUPLICATE_WORKOUT_KEY, _reply
 
 
@@ -77,6 +77,11 @@ async def _reply_workout_logged(update: Update, chat_id: int, row: dict, workout
     reply = f"Logged: {_workout_line(row)}"
     if row.get("calories_burned"):
         reply += f"\n\n{_daily_calorie_balance_text(chat_id, workout_date)}"
+    # Real, deterministic weekly count/total -- see _weekly_workout_summary_text's
+    # docstring for why this is worth showing even when calories_burned wasn't
+    # reported (a typed "/logworkout tennis for an hour" currently gets zero
+    # context otherwise, unlike a meal log's running-total line).
+    reply += f"\n\n{_weekly_workout_summary_text(chat_id, workout_date)}"
     await _reply(update, chat_id, reply)
 
 

@@ -123,6 +123,58 @@ def test_natural_language_log_vitals(monkeypatch):
     assert db.get_recent_vitals(CHAT)[0]["weight_kg"] == 76.6
 
 
+# ---------- richer log confirmations: trend vs previous check-in ----------
+
+def test_vitals_trend_text_reports_weight_and_sleep_deltas():
+    db.add_vitals(CHAT, weight_kg=77.0, sleep_hours=6.0)
+    new_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=7.0)
+    row = db.get_vitals(CHAT, new_id)
+    text = bot._vitals_trend_text(CHAT, row)
+    assert text is not None
+    assert "-0.4kg" in text
+    assert "+1.0h" in text
+
+
+def test_vitals_trend_text_skips_a_field_missing_from_either_side():
+    """A partial check-in (weight only, no sleep this time) must never get
+    a misleading sleep comparison against a field it didn't actually
+    report -- same discipline as db.py's edit functions only touching
+    fields actually passed."""
+    db.add_vitals(CHAT, weight_kg=77.0, sleep_hours=6.0)
+    new_id = db.add_vitals(CHAT, weight_kg=76.6)  # no sleep_hours this time
+    row = db.get_vitals(CHAT, new_id)
+    text = bot._vitals_trend_text(CHAT, row)
+    assert text is not None
+    assert "weight" in text
+    assert "sleep" not in text
+
+
+def test_vitals_trend_text_returns_none_for_a_first_ever_checkin():
+    new_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=7.0)
+    row = db.get_vitals(CHAT, new_id)
+    assert bot._vitals_trend_text(CHAT, row) is None
+
+
+def test_natural_language_log_vitals_shows_trend_against_last_checkin(monkeypatch):
+    db.get_or_create_user(CHAT)
+    db.add_vitals(CHAT, weight_kg=77.0, sleep_hours=6.0)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None,
+                            recent_workouts=None, recent_vitals=None,
+                            recent_tasks=None, recent_messages=None, memory_list=None, recent_events=None,
+                            recent_lifts=None):
+        return {"intent": "log_vitals", "weight_kg": 76.6, "sleep_hours": 7.0,
+                "knee_pain": None, "vitals_notes": None,
+                "clarification_question": None, "casual_reply": None}
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="weight 76.6, slept 7 hours")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "Logged:" in reply
+    assert "Since last check-in" in reply
+
+
 def test_natural_language_log_vitals_backdates_with_logged_days_ago(monkeypatch):
     """Same fix as the meal/workout/expense cases: 'I forgot to log it, but
     last night I weighed 76.6' used to always land on today -- see ai.py's

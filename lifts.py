@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes
 import ai
 import db
 from access import _reject_if_not_allowed
-from formatting import _lift_line
+from formatting import _lift_line, _set_str
 from nutrition import _target_date_from_days_ago
 from replies import _reply
 
@@ -29,16 +29,46 @@ def _recent_lifts_for_ai(chat_id: int) -> list:
     ]
 
 
+def _last_lift_text(chat_id: int, exercise: str, exclude_id: int) -> str | None:
+    """Finds the most recent OTHER logged lift with the same exercise name
+    (case-insensitive exact match), if any, within the recent pool
+    db.get_recent_lifts already fetches -- real DB read, no AI involved,
+    same discipline as formatting._weekly_workout_summary_text. Returns
+    None (not "no prior data" text) when there's nothing to compare against,
+    so a genuinely new exercise doesn't get a confusing empty comparison
+    line. Deliberately just the sets, not the full _lift_line -- the
+    exercise name and location are already in the line just above this
+    one, repeating them would be noise."""
+    target = (exercise or "").strip().lower()
+    if not target:
+        return None
+    for row in db.get_recent_lifts(chat_id, limit=30):
+        if row["id"] == exclude_id:
+            continue
+        if (row.get("exercise") or "").strip().lower() == target:
+            sets_str = ", ".join(_set_str(s) for s in (row.get("sets") or [])) or "no sets recorded"
+            return f"Last time ({row['lift_date']}): {sets_str}"
+    return None
+
+
 async def _log_lift_and_reply(update: Update, chat_id: int, item: dict, lift_date: str | None = None):
     """Shared by /loglift and the single-exercise natural-language path --
     one insert, one reply shape (see finance._balance_text's docstring for
-    the same reasoning applied elsewhere)."""
+    the same reasoning applied elsewhere). Also shows a same-exercise
+    comparison against the most recent prior time this exercise was logged,
+    when there is one (see _last_lift_text) -- the kind of thing a real
+    training partner would actually notice and mention, not just a bare
+    "logged" confirmation."""
     lift_id = db.add_lift(
         chat_id, item.get("exercise") or "exercise", item.get("location"), item.get("sets"),
         effort=item.get("effort"), context_notes=item.get("context_notes"), lift_date=lift_date,
     )
     row = db.get_lift(chat_id, lift_id)
-    await _reply(update, chat_id, f"Logged: {_lift_line(row)}")
+    reply = f"Logged: {_lift_line(row)}"
+    last = _last_lift_text(chat_id, row["exercise"], exclude_id=row["id"])
+    if last:
+        reply += f"\n{last}"
+    await _reply(update, chat_id, reply)
 
 
 async def _log_lifts_and_reply(update: Update, chat_id: int, lifts: list):
