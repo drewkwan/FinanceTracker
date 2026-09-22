@@ -441,6 +441,32 @@ def test_answer_with_rundown_uses_the_narration_model(monkeypatch):
     assert fake.calls[0]["model"] == "narration-model-x"
 
 
+# ---------- event correction: reschedule (not delete) ----------
+# Regression guards for a real, actively harmful bug: a date-correction
+# message against an event ("correct both to 2026-09-23") used to have no
+# matching action at all (only "delete" existed for events), and the model
+# chose "delete" -- silently destroying real scheduled events instead of
+# moving them. See correction.py's EVENT_DOMAIN_ACTIONS for the full story.
+
+def test_parse_system_prompt_offers_reschedule_for_events():
+    assert '"reschedule"' in ai.PARSE_SYSTEM_PROMPT
+    assert "new_event_in_days" in ai.PARSE_SYSTEM_PROMPT
+
+
+def test_parse_system_prompt_warns_against_deleting_instead_of_rescheduling():
+    """Guards the guardrail itself -- the exact real bug this prevents was
+    the model picking 'delete' for a message that was actually asking to
+    move an event's date."""
+    prompt = ai.PARSE_SYSTEM_PROMPT
+    assert "2026-09-23" in prompt  # the actual real-world example that broke
+    assert "never use \"delete\" as a stand-in for" in prompt
+
+
+def test_clarify_fallback_includes_new_event_in_days():
+    result = ai._clarify_fallback("huh?")
+    assert result["new_event_in_days"] is None
+
+
 def test_answer_with_day_stats_uses_the_narration_model(monkeypatch):
     monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
     monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")

@@ -307,11 +307,13 @@ def test_event_correction_with_unmatched_id_says_not_sure(monkeypatch):
     assert "Found that" not in reply
 
 
-def test_event_correction_rejects_unsupported_reschedule_action(monkeypatch):
-    """Rescheduling stays command-only (/rescheduleevent) -- a correction
-    attempting edit_date against an event must hit the "found it, but
-    that's not supported" branch, not silently succeed or look like the
-    event wasn't found at all."""
+def test_event_correction_rejects_edit_date_action(monkeypatch):
+    """"edit_date" specifically (backward-looking days_ago math) is still
+    NOT a supported action for events, even though "reschedule" (forward-
+    looking new_event_in_days -- see the section below) now is -- a
+    correction attempting edit_date against an event must hit the "found
+    it, but that's not supported" branch, not silently succeed or look like
+    the event wasn't found at all."""
     db.get_or_create_user(CHAT)
     event_id = db.add_event(CHAT, "Company Tennis", _in_days(2))
 
@@ -331,6 +333,122 @@ def test_event_correction_rejects_unsupported_reschedule_action(monkeypatch):
     assert "Found that event" in reply
     assert "isn't supported yet" in reply
     assert db.get_event(CHAT, event_id)["event_date"] == _in_days(2)  # untouched
+
+
+# ---------- natural-language correction: "reschedule" moves an event ----------
+#
+# Regression tests for a real, actively harmful bug: before "reschedule"
+# existed, a date-correction message against an event ("correct both to
+# 2026-09-23", "push day should be 2026-09-23") had no matching action at
+# all -- only "delete" was ever supported for events -- and the model chose
+# "delete", silently destroying two real scheduled events instead of moving
+# them. See correction.py's EVENT_DOMAIN_ACTIONS and ai.py's
+# target_domain="event" prompt rules for the fix.
+
+def test_correction_can_reschedule_an_event_via_natural_language(monkeypatch):
+    """The exact real scenario: an event landed on the wrong day and the
+    user corrects it by name -- this must move the event, not delete it."""
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Push day in the office gym", _in_days(1), notes="quick session after work")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "reschedule", "new_event_in_days": 0,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="push day should be today, not tomorrow")
+    _run(bot.handle_text(update, FakeContext()))
+
+    row = db.get_event(CHAT, event_id)
+    assert row is not None  # NOT deleted
+    assert row["event_date"] == _in_days(0)
+    reply = update.message.replies[-1]
+    assert "Rescheduled" in reply
+    assert "Deleted" not in reply
+
+
+def test_undo_reverts_an_event_reschedule_correction(monkeypatch):
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Coworking session with Scott", _in_days(1), event_time="22:00")
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "reschedule", "new_event_in_days": 0,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    reschedule_update = FakeUpdate(CHAT, text="correct that to today")
+    _run(bot.handle_text(reschedule_update, context))
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(0)
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(1)
+
+
+def test_event_reschedule_correction_with_no_day_given_asks_which_day(monkeypatch):
+    db.get_or_create_user(CHAT)
+    event_id = db.add_event(CHAT, "Dinner with Mel", _in_days(2))
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "event", "target_expense_id": event_id,
+            "correction_action": "reschedule", "new_event_in_days": None,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="that date's wrong for dinner with Mel")
+    _run(bot.handle_text(update, FakeContext()))
+    reply = update.message.replies[-1]
+    assert "which day" in reply.lower()
+    assert db.get_event(CHAT, event_id)["event_date"] == _in_days(2)  # untouched
+    assert db.get_event(CHAT, event_id) is not None  # NOT deleted
+
+
+def test_rescheduling_two_events_in_the_same_conversation_neither_gets_deleted(monkeypatch):
+    """The exact shape of the real transcript: two events both corrected to
+    the same day, one after another -- both must survive as reschedules,
+    not deletes."""
+    db.get_or_create_user(CHAT)
+    gym_id = db.add_event(CHAT, "Push day in the office gym", _in_days(1))
+    coworking_id = db.add_event(CHAT, "Coworking session with Scott", _in_days(1), event_time="22:00")
+
+    responses = iter([
+        {"intent": "correction", "target_domain": "event", "target_expense_id": coworking_id,
+         "correction_action": "reschedule", "new_event_in_days": 0,
+         "clarification_question": None, "casual_reply": None},
+        {"intent": "correction", "target_domain": "event", "target_expense_id": gym_id,
+         "correction_action": "reschedule", "new_event_in_days": 0,
+         "clarification_question": None, "casual_reply": None},
+    ])
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return next(responses)
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    _run(bot.handle_text(FakeUpdate(CHAT, text="sorry correct both to today"), context))
+    _run(bot.handle_text(FakeUpdate(CHAT, text="push day should be today too"), context))
+
+    assert db.get_event(CHAT, gym_id) is not None
+    assert db.get_event(CHAT, coworking_id) is not None
+    assert db.get_event(CHAT, gym_id)["event_date"] == _in_days(0)
+    assert db.get_event(CHAT, coworking_id)["event_date"] == _in_days(0)
 
 
 # ---------- handlers._recent_events_for_ai ----------

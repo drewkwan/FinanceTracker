@@ -277,7 +277,7 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     compatibility; "balance" is different from the rest -- see below and the adjust_balance rule),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
     list; not applicable/always null for target_domain="balance", which has no recent-item list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "edit_workout" | "edit_lift" | "adjust_balance" | "edit_unsupported_field" or null (correction only),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "edit_workout" | "edit_lift" | "reschedule" | "adjust_balance" | "edit_unsupported_field" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back -- for an explicit calendar date
     or weekday ("move it to the 18th"), compute this against "Today's actual date" given at the top of this
@@ -333,6 +333,12 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     changes it),
   "new_lift_context_notes": string or null (correction + edit_lift only -- ONLY set if the message actually
     changes it),
+  "new_event_in_days": integer or null (correction + reschedule only, target_domain="event" -- a plain count of
+    days from today the event should move TO, computed against "Today's actual date is ..." the same way
+    event_in_days works for a brand-new event -- 0 = today, 1 = tomorrow, etc. FORWARD-looking, never a
+    days-ago count -- this is deliberately a separate field from days_ago, not a reuse of it, since an event
+    correction always means "move it to this day" (a future/near date), never "it actually happened N days in
+    the past" the way edit_date's days_ago means for every backward-logged domain),
   "new_description": string or null (correction + edit_description only, target_domain="expense"; ALSO reused
     for correction + edit_task, target_domain="task" -- the to-do's corrected title, ONLY set if the message
     actually changes the title itself, not just its due date or notes),
@@ -452,7 +458,10 @@ Deciding the intent:
   below; "the X-ray is done, take it off my schedule", "cancel dinner with Mel", "that appointment got moved,
   just remove it for now" are target_domain="event", correction_action="delete" as long as the id/title matches
   the upcoming-events list -- see target_domain="event"'s own paragraph below for why "done" means DELETE there,
-  not mark_done) -- OR about the
+  not mark_done; but "correct both to 2026-09-23", "push day should be tomorrow", "actually dinner with Mel is
+  Thursday not Wednesday" are target_domain="event", correction_action="reschedule" (NOT "delete" -- the event
+  is moving to a different day, not going away -- see the CRITICAL warning below on this exact distinction)) --
+  OR about the
   rolled-over balance/deficit itself rather than any one
   logged item (target_domain="balance", see its own paragraph below). First decide target_domain from context
   (an amount/currency strongly implies "expense"; food/calories implies "meal"; a workout activity implies
@@ -490,9 +499,9 @@ Deciding the intent:
   "edit_workout" (a flexible activity/duration/distance/calories-burned/notes correction -- see below), and
   "delete" are supported; for "lift" targets, "edit_date", "edit_lift" (a flexible sets/location/effort/notes
   correction -- see below), and "delete" are supported; for "task" targets, "mark_done", "edit_task" (a
-  flexible title/due-date/notes edit -- see below), and "delete" are supported; for "event" targets, only
-  "delete" is supported (an event has no "done" state and rescheduling is command-only right now -- see
-  target_domain="event"'s own paragraph below).
+  flexible title/due-date/notes edit -- see below), and "delete" are supported; for "event" targets,
+  "reschedule" (move it to a new day -- see target_domain="event"'s own paragraph below) and "delete" are
+  supported.
 
   CRITICAL: never default to "edit_date" just because it's the first-listed or most familiar action -- only
   use "edit_date" when the message is actually about WHEN something happened (a day/date), never as a
@@ -500,14 +509,27 @@ Deciding the intent:
   "correct the calories out to 2862" (a workout's calories_burned, before edit_workout existed to handle it
   properly) got misclassified as correction_action="edit_date" with no day mentioned, producing a nonsense
   "which day did you mean?" question completely unrelated to what was actually asked. If the user wants a
-  field fixed that genuinely isn't in that domain's supported-actions list above (currently only vitals and
-  event have real gaps left), set correction_action="edit_unsupported_field" instead of guessing at the
-  closest-sounding valid action -- this produces an accurate "that kind of edit isn't supported yet" reply
-  naming what IS supported, instead of a confusing off-topic question. If nothing in the matching list clearly
-  matches, or more than one plausibly does, do NOT guess -- use "clarification" instead and ask the user to
-  specify. If a single message describes MORE THAN ONE correction at once, do NOT fall back to "casual" just
-  because it's compound -- pick whichever one is clearest/most specific and resolve that one as a normal
-  "correction"; the user will follow up separately about the other one if your reply doesn't cover it.
+  field fixed that genuinely isn't in that domain's supported-actions list above (currently only vitals has a
+  real gap left), set correction_action="edit_unsupported_field" instead of guessing at the closest-sounding
+  valid action -- this produces an accurate "that kind of edit isn't supported yet" reply naming what IS
+  supported, instead of a confusing off-topic question. If nothing in the matching list clearly matches, or
+  more than one plausibly does, do NOT guess -- use "clarification" instead and ask the user to specify. If a
+  single message describes MORE THAN ONE correction at once, do NOT fall back to "casual" just because it's
+  compound -- pick whichever one is clearest/most specific and resolve that one as a normal "correction"; the
+  user will follow up separately about the other one if your reply doesn't cover it.
+
+  CRITICAL, separately from the above: never use "delete" as a stand-in for "the date/day is wrong and needs
+  to change" -- a message asking to correct, fix, change, move, or reschedule WHEN something is happening
+  means the item should be MOVED, not REMOVED, even if the domain's only other obvious-looking action is
+  "delete". This is a real, actively harmful bug that already happened: "correct both to 2026-09-23" and "push
+  day should be 2026-09-23" (two events that had landed on the wrong day) were misread as correction_action=
+  "delete" and silently destroyed two real scheduled events instead of moving them -- the exact opposite of
+  what was asked, and not reversible by the user without noticing and typing "undo" in time. For "event"
+  targets specifically, "reschedule" (see below) is EXACTLY this case and must be used instead of "delete"
+  whenever the message names or implies a different day the event should move to. If you are ever choosing
+  between "delete" and some other action for a message that mentions a date, day, or "when" at all, treat that
+  as a strong signal AWAY from "delete" -- re-read the message for whether it means "get rid of this" (delete
+  is right) or "this is happening on a different day than logged" (it is not).
   target_domain="balance" (correction_action is always "adjust_balance") is its own case, unlike every other
   domain above: it has no recent-item list and no target_expense_id to match, because the rolled-over balance
   is one running number per chat, not a row. Use it when the user wants to correct the balance/deficit ITSELF
@@ -566,14 +588,19 @@ Deciding the intent:
   new_lift_exercise/new_lift_location/new_lift_effort/new_lift_context_notes if the message specifically
   changes those too; leave them null otherwise. If the message is about a lift but it's unclear what actually
   changed, use "clarification" and ask what to fix.
-  target_domain="event" is a narrower case than every domain above -- an event has no "done" state to set (see
-  events.py's design: it's a flat, dated occurrence, not a to-do), so correction_action is ALWAYS "delete" for
-  it, never "mark_done" -- phrasing like "the X-ray is done", "that appointment already happened", "cancel
-  dinner with Mel", "that's not happening anymore, take it off my schedule" all mean the SAME thing for an
-  event: remove it from the upcoming list. Match target_expense_id against the upcoming-events list the same
-  way as any other domain (title/date, or a bare id). Rescheduling an event to a new day is command-only right
-  now (/rescheduleevent) -- if the message is clearly asking to move an event's date rather than remove it,
-  use "clarification" and point at that command, don't attempt a delete instead.
+  target_domain="event" supports exactly two actions: "delete" and "reschedule" -- an event has no "done"
+  state to set (see events.py's design: it's a flat, dated occurrence, not a to-do), so correction_action is
+  NEVER "mark_done" for it. Phrasing like "the X-ray is done", "that appointment already happened", "cancel
+  dinner with Mel", "that's not happening anymore, take it off my schedule" all mean REMOVE it -- use "delete".
+  Phrasing like "correct that to the 23rd", "push day should be tomorrow, not today", "actually that's
+  Thursday, not Wednesday", "move dinner with Mel to next Tuesday", or anything else naming or implying a
+  DIFFERENT day the event should be on, means MOVE it -- use "reschedule" with new_event_in_days set to that
+  day's offset from today (see new_event_in_days' own field doc above; never leave it null when a day is
+  actually implied -- if the day genuinely isn't clear, use "clarification" and ask which day, never guess and
+  never fall back to "delete"). See the CRITICAL warning above for the real, destructive bug this distinction
+  exists to prevent -- when in doubt between these two, re-read for whether the event is going away entirely
+  or just moving to a different day. Match target_expense_id against the upcoming-events list the same way as
+  any other domain (title/date, or a bare id).
 - "show_balance": the message is asking to see the current balance/target/streak right now (e.g. "show me my
   balance", "what's my balance", "how much do I have left today", "how am I doing today"). This is answered
   directly and immediately with real numbers -- it is NOT a "casual" reply pointing at the /balance command,
@@ -1607,6 +1634,7 @@ def _clarify_fallback(message: str) -> dict:
         "new_lift_sets": None,
         "new_lift_effort": None,
         "new_lift_context_notes": None,
+        "new_event_in_days": None,
         "memory_label": None,
         "memory_content": None,
         "memory_category": None,

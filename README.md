@@ -503,12 +503,19 @@ applies, so one chat's failure never blocks the nudge reaching anyone else.
   no "done" state (see above), so "X is done" here means the same thing as
   "delete X" — there's nothing to mark complete, just something to take off
   the list. `/removeevent <id>` does the same thing as a command.
-- **Rescheduling is command-only right now**: `/rescheduleevent <id> <days
-  from today>` — reverses with one-word `undo` like everything else. Natural
-  language handles adding, viewing, and clearing an event, but moving one to
-  a new day by free text isn't wired up yet (a correction asking to
-  reschedule gets a clarifying nudge toward the command instead of silently
-  doing nothing). Come back to this if it turns out to matter in practice.
+- **Move one to a new day by natural language too** — "correct that to the
+  23rd", "push day should be tomorrow, not today", "move dinner with Mel to
+  next Tuesday" all reschedule the event in place, the same before/after
+  confirmation and one-word `undo` as a delete. `/rescheduleevent <id>
+  <days from today>` still works as the direct command-line equivalent.
+  This is deliberately a *different* action from clearing one — "the event
+  is moving to a different day" and "the event is going away entirely" are
+  different requests, and confusing the two used to be a real, actively
+  harmful bug: before natural-language rescheduling existed, a
+  date-correction message had no matching action at all (only clearing an
+  event did), and it got misread as a delete — silently destroying two real
+  scheduled events instead of moving them. Both actions now exist
+  end-to-end, so there's no ambiguous case left to guess wrong on.
 - **Deliberately flat, not truly recurring.** There's no "every Wednesday"
   rule here — a real recurring event needs day-of-week/interval matching plus
   the classic "edit one occurrence vs. all future occurrences" problem,

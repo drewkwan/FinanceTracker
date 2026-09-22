@@ -19,20 +19,29 @@ there's a concrete need for it.
 
 ADD (a single event, or a whole list in one message -- e.g. seven workout
 slots for the week) and SHOW work directly through the add_event/show_events
-intents. Clearing an existing event ALSO works by natural language, but
-through correction.py's target_domain="event" path (action "delete" only --
-see its own module docstring), not through a dedicated intent here -- "the
-X-ray is done"/"cancel dinner with Mel" reads as a correction, the same as
-"delete that expense" or "mark the dentist call done". This needed
-ai.parse_message to be handed a recent-upcoming-events list (see its
-docstring for why that was a real, deliberate signature change, not the
-same "avoid widening the call" cut reminders.py made) -- added after a real
-observed bug: without it, an event id had no way to be told apart from a
-task id, so "X is done" against an event confidently misfired as a task
-correction instead. Rescheduling remains slash-command-only
-(/rescheduleevent <id> <days from today>) -- there's no natural "this is
-what changed" shape for it the way there is for a delete, so it's deferred
-until there's a concrete case to design it against.
+intents. Clearing or moving an existing event ALSO works by natural
+language, but through correction.py's target_domain="event" path (actions
+"delete" and "reschedule" -- see its own module docstring), not through a
+dedicated intent here -- "the X-ray is done"/"cancel dinner with Mel" reads
+as a delete correction, and "push day should be tomorrow"/"correct that to
+the 23rd" reads as a reschedule correction, the same as "delete that
+expense" or "that was actually 2 days ago". This needed ai.parse_message to
+be handed a recent-upcoming-events list (see its docstring for why that was
+a real, deliberate signature change, not the same "avoid widening the call"
+cut reminders.py made) -- added after a real observed bug: without it, an
+event id had no way to be told apart from a task id, so "X is done" against
+an event confidently misfired as a task correction instead.
+
+Natural-language rescheduling (correction_action="reschedule") was added
+after a second, more serious real observed bug: before it existed, a
+date-correction message ("correct both to 2026-09-23") had no matching
+action for events at all (only "delete" was ever supported), and the model
+chose "delete" instead of asking for clarification -- silently destroying
+two real scheduled events instead of moving them. /rescheduleevent <id>
+<days from today> still exists as the direct command-line equivalent (and
+is what natural language now calls under the hood, via db.edit_event_date),
+but the natural-language path is what most messages actually go through, so
+it needed the same capability, not just a "that command exists" pointer.
 """
 
 from datetime import date, timedelta

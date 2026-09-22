@@ -86,10 +86,23 @@ TASK_DOMAIN_ACTIONS = {"mark_done", "edit_task", "delete"}
 MEAL_DOMAIN_ACTIONS = {"edit_date", "edit_meal", "delete"}
 WORKOUT_DOMAIN_ACTIONS = {"edit_date", "edit_workout", "delete"}
 LIFT_DOMAIN_ACTIONS = {"edit_date", "edit_lift", "delete"}
-# event gets the narrowest bucket of all -- an event has no "done" state and no other
-# editable field via natural language yet (rescheduling stays command-only, see
-# events.py's module docstring), so "delete" is the only thing a correction can do to one.
-EVENT_DOMAIN_ACTIONS = {"delete"}
+# event supports "reschedule" and "delete" -- an event has no "done" state
+# (see events.py's design), so those are the only two things a correction
+# can do to one. "reschedule" is its own action, not "edit_date", because an
+# event's date is FORWARD-looking (new_event_in_days, "N days from today" --
+# the same shape add_event/rescheduleevent_cmd already use), never backward
+# like edit_date's days_ago math everywhere else -- the two can't share a
+# field without one of them meaning the wrong direction. This exists
+# specifically because of a real, actively harmful bug: before "reschedule"
+# existed, "correct both to 2026-09-23" / "push day should be 2026-09-23"
+# had NO matching action for events (only "delete" was ever available), and
+# the model chose "delete" -- silently destroying the event instead of
+# moving it, rather than asking for clarification the way the prompt at the
+# time actually told it to. A prompt instruction alone wasn't enough to
+# prevent a destructive guess; giving the model a real, correct action to
+# reach instead removes the guess entirely (see ai.py's correction_action
+# rules for the matching CRITICAL warning).
+EVENT_DOMAIN_ACTIONS = {"reschedule", "delete"}
 
 _DOMAIN_OPS = {
     "meal": {"noun": "meal", "recent_cmd": "/recentmeals", "date_field": "meal_date",
@@ -118,13 +131,12 @@ _DOMAIN_OPS = {
               "get": db.get_task, "delete": db.delete_task, "restore": db.restore_deleted_task,
               "line": _task_line, "mark_done": db.mark_task_done, "unmark_done": db.unmark_task_done,
               "edit_task": db.edit_task},
-    "event": {"noun": "event", "recent_cmd": "/events",
+    "event": {"noun": "event", "recent_cmd": "/events", "date_field": "event_date",
                "actions": EVENT_DOMAIN_ACTIONS,
-               "actions_desc": "only deleting one (an event has no \"done\" state -- \"X is done\" or \"that "
-                                "already happened\" both just mean remove it; reschedule with "
-                                "/rescheduleevent <id> <days from today>)",
+               "actions_desc": "moving it to a new day, or deleting one (an event has no \"done\" state -- "
+                                "\"X is done\" or \"that already happened\" both just mean remove it)",
                "get": db.get_event, "delete": db.delete_event, "restore": db.restore_deleted_event,
-               "line": _event_line},
+               "line": _event_line, "reschedule": db.edit_event_date},
 }
 
 
@@ -186,6 +198,38 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
             update, chat_id,
             f"Updated -- that {noun} is now dated {updated[ops['date_field']]} (was {old_date}). "
             "Reply 'undo' if that's wrong."
+        )
+        return
+
+    if action == "reschedule":
+        # Events only -- a forward-looking date move (new_event_in_days,
+        # "N days from today"), NOT edit_date's backward-only days_ago math.
+        # This is the fix for a real, actively harmful bug: "correct both to
+        # 2026-09-23" / "push day should be 2026-09-23" used to have no
+        # matching action for events at all (only "delete" existed), and the
+        # model chose "delete" -- silently destroying the event instead of
+        # moving it. See EVENT_DOMAIN_ACTIONS' own comment for the full story.
+        new_event_in_days = parsed.get("new_event_in_days")
+        if not isinstance(new_event_in_days, int) or new_event_in_days < 0:
+            await _reply(
+                update, chat_id,
+                f"Which day should that {noun} move to? (e.g. today, tomorrow, or '3 days from now')"
+            )
+            return
+        today = date.fromisoformat(db.today_str())
+        new_date = today + timedelta(days=new_event_in_days)
+        old_date = row[ops["date_field"]]
+        updated = ops["reschedule"](chat_id, target_id, new_date.isoformat())
+        # Snapshot shape matches what _revert_last_correction's own
+        # domain=="event" branch already expects (event_id/old_date) -- that
+        # branch has existed since /rescheduleevent shipped, this just gives
+        # natural language a way to reach it too.
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "reschedule", "event_id": target_id, "old_date": old_date,
+        }
+        await _reply(
+            update, chat_id,
+            f"Rescheduled: {ops['line'](updated)} (was {old_date}). Reply 'undo' if that's wrong."
         )
         return
 
