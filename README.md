@@ -209,6 +209,14 @@ natural-language pattern.
   Morrow decides which domain a message belongs to based on whether real
   set/rep/weight detail was actually given — "gym, legs day" on its own
   stays a `log_workout`; "squat 90kg x5x3, felt strong" is a `log_lift`.
+- **A described completed session always logs as `log_lift`, never
+  `remember`, even right after Morrow itself used the word "remember."**
+  Asking "want me to remember your Visa pull day routine going forward?"
+  and then answering with the real numbers you just did is still a session
+  that happened — it logs for real, the same as if you'd led with it
+  unprompted. This closes a real bug where Morrow's own prior wording
+  primed the model into filing an actual workout as a memory note instead
+  of a queryable, correctable logged session.
 - **Each exercise carries its own location** (e.g. "AF Wheelock", "office
   gym", "Capella"), kept as free text rather than a fixed list — your gym
   vocabulary shifts over time, and different locations/machines aren't
@@ -336,7 +344,15 @@ real room to actually converse, fed:
   `day_stats` trusts), so it can actually converse with knowledge of how
   today's going ("nothing logged yet today, quiet one so far") instead of
   talking in a vacuum, without ever recomputing or guessing at a number
-  itself.
+  itself, and
+- `recent_lifts` — real logged gym-exercise rows (exercise, location, sets,
+  effort, notes, date), most recent first. This grounds any gym-routine
+  question ("what's my push day at Visa look like") in actual logged data
+  rather than letting the model freely narrate from durable-memory prose —
+  fixing a real bug where the exact sets/reps/weight quoted back would
+  drift between two near-identical questions asked minutes apart in the
+  same conversation. If a specific session simply isn't in the recent-lifts
+  data, Morrow says so rather than reconstructing one from context.
 
 It also uses a separate model setting, `CLAUDE_NARRATION_MODEL` (an
 optional env var, defaults to whatever `CLAUDE_MODEL` is set to — see
@@ -550,6 +566,19 @@ last week") would otherwise lose its shape as plain prose. Telegram has
 no real table support in any client, so a literal markdown table is never
 used -- it would just render as a wall of pipes and dashes; a short fenced
 block is the substitute when something truly needs aligned columns.
+
+`to_telegram_html` also normalizes a literal backslash-n (or
+backslash-r-backslash-n) into a real line break before anything else runs.
+This fixes a real observed bug: the rolling conversation history fed into
+narration prompts is JSON-serialized, which turns a real newline inside an
+earlier reply into that same two-character escape sequence within the JSON
+string -- when the model closely echoes or paraphrases a near-identical
+earlier reply, it could reproduce that raw serialized form verbatim instead
+of a real newline, so the user would see literal `\n` characters in the
+message. There's a matching prompt instruction too, but the normalization
+here is the actual guarantee, the same defense-in-depth pattern used
+elsewhere in this codebase (a prompt instruction alone already failed once
+for the event-reschedule bug).
 
 ## Files
 

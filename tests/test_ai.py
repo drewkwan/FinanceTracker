@@ -467,6 +467,72 @@ def test_clarify_fallback_includes_new_event_in_days():
     assert result["new_event_in_days"] is None
 
 
+# ---------- log_lift vs remember: not primed by Morrow's own wording ----------
+# Regression guards for a real observed bug: a fully-described completed
+# workout got filed as "remember" instead of "log_lift" purely because
+# Morrow's own preceding reply had used the word "remember" in a follow-up
+# question -- so the real session never landed as queryable/correctable data,
+# only a vague memory paragraph. See ai.py's log_lift/remember sections for
+# the full story.
+
+def test_parse_system_prompt_warns_log_lift_against_remember_priming():
+    prompt = ai.PARSE_SYSTEM_PROMPT
+    assert 'never "remember", even if Morrow\'s OWN immediately preceding message' in prompt
+
+
+def test_parse_system_prompt_warns_remember_against_its_own_priming():
+    prompt = ai.PARSE_SYSTEM_PROMPT
+    assert 'never classify a message as "remember" just' in prompt
+    assert "Morrow's OWN preceding reply used the word \"remember\"" in prompt
+
+
+# ---------- casual conversation grounded in real lift data ----------
+# Regression guards for a second real observed bug: gym-routine questions
+# ("what's my push day at Visa look like") were answered by freely narrating
+# from the memory-table prose blob, so exact sets/reps/weight drifted between
+# successive near-identical questions in the same conversation -- the same
+# "real numbers in, never guessed" violation day_stats/rundown already fixed
+# elsewhere. See lifts._recent_lifts_for_narration and ai.answer_casually.
+
+def test_answer_casually_includes_recent_lifts_in_the_prompt(monkeypatch):
+    fake = _mock_recording_client(monkeypatch, "Last Visa pull day: pull-ups 10x3.")
+    recent_lifts = [{"exercise": "pull-ups", "location": "Visa gym",
+                      "sets": [{"reps": 10, "load": None}] * 3, "effort": None,
+                      "context_notes": None, "lift_date": "2026-09-22"}]
+    ai.answer_casually("what's my push day at visa look like", [], [], {}, recent_lifts)
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "Visa gym" in sent
+    assert "pull-ups" in sent
+
+
+def test_answer_casually_recent_lifts_defaults_to_empty_list(monkeypatch):
+    """Backward-compat: existing call sites that don't pass recent_lifts at
+    all must keep working, same as every other optional param here."""
+    fake = _mock_recording_client(monkeypatch, "hey!")
+    reply = ai.answer_casually("hi", [], [], {})
+    assert reply == "hey!"
+    assert "recent_lifts:\n[]" in fake.calls[0]["messages"][0]["content"]
+
+
+def test_casual_system_prompt_grounds_lift_questions_in_real_data():
+    prompt = ai.CASUAL_SYSTEM_PROMPT
+    assert "recent_lifts" in prompt
+    assert "never in the durable-memory prose" in prompt
+
+
+# ---------- literal backslash-n formatting bug ----------
+# Regression guard for a real observed bug: at least two of Morrow's replies
+# contained the literal two characters "\n" as visible text instead of an
+# actual line break, likely from the model echoing JSON-serialized
+# conversation history verbatim. See tg_html.py's normalization fix and this
+# prompt-level instruction (defense in depth, same pattern as the event
+# reschedule fix -- a prompt instruction alone already failed once).
+
+def test_telegram_formatting_note_warns_against_literal_backslash_n():
+    assert "backslash-n" in ai.TELEGRAM_FORMATTING_NOTE
+    assert "never the two literal characters" in ai.TELEGRAM_FORMATTING_NOTE
+
+
 def test_answer_with_day_stats_uses_the_narration_model(monkeypatch):
     monkeypatch.setattr(ai.config, "CLAUDE_NARRATION_MODEL", "narration-model-x")
     monkeypatch.setattr(ai.config, "CLAUDE_MODEL", "extraction-model-y")

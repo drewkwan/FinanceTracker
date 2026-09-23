@@ -70,6 +70,39 @@ def test_escaping_happens_before_markdown_promotion_not_after():
     assert to_telegram_html("**mom & dad**") == "<b>mom &amp; dad</b>"
 
 
+# ---------- literal backslash-n normalization ----------
+# Regression guards for a real observed bug: at least two of Morrow's own
+# replies contained the two literal characters "\n" as visible text instead
+# of an actual line break -- see the module docstring for the suspected
+# mechanism (echoing JSON-serialized conversation history verbatim).
+
+def test_literal_backslash_n_becomes_a_real_line_break():
+    text = "Your push day at Visa:\\n\\nPull-ups: bodyweight 3x8"
+    assert to_telegram_html(text) == "Your push day at Visa:\n\nPull-ups: bodyweight 3x8"
+
+
+def test_literal_backslash_r_backslash_n_is_also_normalized():
+    text = "line one\\r\\nline two"
+    assert to_telegram_html(text) == "line one\nline two"
+
+
+def test_real_newlines_are_left_untouched():
+    # A real newline character (not the two-character escape sequence) must
+    # pass straight through unchanged -- this fix is only for the literal
+    # text form, not a general "reformat all line breaks" pass.
+    text = "line one\nline two"
+    assert to_telegram_html(text) == "line one\nline two"
+
+
+def test_normalized_newline_still_interacts_correctly_with_fenced_blocks():
+    # The fence regex expects real newlines after a language hint -- prove
+    # normalization runs BEFORE fence promotion, not after, so a literal
+    # backslash-n reaching Telegram inside a fenced block still becomes a
+    # real line break rather than surviving as visible text.
+    text = "```\\nMon  30min run\\nTue  --\\n```"
+    assert to_telegram_html(text) == "<pre>Mon  30min run\nTue  --</pre>"
+
+
 def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 

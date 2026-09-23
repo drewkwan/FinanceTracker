@@ -21,7 +21,7 @@ from correction import CORRECTION_UNDO_PHRASES, LAST_CORRECTION_KEY, _handle_cor
 from finance import _balance_text, _recent_text
 from fitness import _force_log_workout_and_reply, _reply_workout_logged
 from formatting import _money, _status_text
-from lifts import _log_lifts_and_reply, _recent_lifts_for_ai
+from lifts import _log_lifts_and_reply, _recent_lifts_for_ai, _recent_lifts_for_narration
 from memory import _memory_for_ai, _memory_text
 from nutrition import _log_meals_and_reply, _target_date_from_days_ago
 from events import _add_events_and_reply, _events_text
@@ -89,15 +89,20 @@ async def _casual_reply_text(chat_id: int, message: str, recent_messages: list, 
     reuses the exact same real, deterministically-computed figures day_stats
     already trusts (db.get_status + rundown._day_stats_payload for today) --
     one source of "how's today going", not a second copy that could drift.
-    Falls back to parse_message's own casual_reply field (or a generic
-    line) if the dedicated call itself fails, same discipline as rundown/
-    day_stats falling back to deterministic text on an AI-call exception."""
+    recent_lifts (lifts._recent_lifts_for_narration) similarly grounds any
+    gym-routine question in real logged rows instead of letting the model
+    freely narrate from memory prose -- see ai.answer_casually's docstring
+    for the real observed bug this replaces. Falls back to parse_message's
+    own casual_reply field (or a generic line) if the dedicated call itself
+    fails, same discipline as rundown/day_stats falling back to
+    deterministic text on an AI-call exception."""
     today_snapshot = {
         "balance": db.get_status(chat_id),
         "today": _day_stats_payload(chat_id, db.today_str()),
     }
+    recent_lifts = _recent_lifts_for_narration(chat_id)
     try:
-        return ai.answer_casually(message, recent_messages, memory_list, today_snapshot)
+        return ai.answer_casually(message, recent_messages, memory_list, today_snapshot, recent_lifts)
     except Exception:
         logger.exception("answer_casually failed, falling back to parse_message's casual_reply")
         return fallback or (

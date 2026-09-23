@@ -607,7 +607,7 @@ def test_casual_intent_uses_the_dedicated_answer_casually_call(monkeypatch):
 
     captured = {}
 
-    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot):
+    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot, recent_lifts=None):
         captured["message"] = message
         captured["today_snapshot"] = today_snapshot
         return "Hey! Doing well, how about you?"
@@ -637,7 +637,7 @@ def test_casual_intent_falls_back_to_parsed_casual_reply_if_dedicated_call_fails
                             recent_lifts=None):
         return _casual_parse_response(casual_reply="Hey! (fallback)")
 
-    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot):
+    def fake_answer_casually(message, recent_messages, memory_list, today_snapshot, recent_lifts=None):
         raise RuntimeError("API blip")
 
     monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)

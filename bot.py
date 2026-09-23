@@ -130,6 +130,7 @@ from lifts import (
     _log_lift_and_reply,
     _log_lifts_and_reply,
     _recent_lifts_for_ai,
+    _recent_lifts_for_narration,
     loglift_cmd,
     recentlifts,
 )

@@ -410,6 +410,24 @@ Deciding the intent:
   (the lift detail almost always is, since it's the more specific content) and let the other be logged in a
   follow-up message rather than guessing at fields for the one you skip, the same discipline as the
   log_workout/log_vitals overlap below.
+  CRITICAL: a message reporting a session that ACTUALLY HAPPENED -- concrete sets/reps/weight for a named
+  exercise, on today or a specific past day ("yesterday", "last night", "this morning") -- is ALWAYS
+  "log_lift", never "remember", even if Morrow's OWN immediately preceding message used the word "remember"
+  (e.g. asking "want me to remember your Visa pull day routine going forward?"). That prior wording is an
+  offer to save a REUSABLE ROUTINE for the future -- it does not retroactively turn the user's answer into a
+  memory note instead of a real logged session. This is a real observed bug: a fully-described completed
+  workout (specific exercises, sets, reps, weights) got filed as "remember" instead of "log_lift" purely
+  because Morrow's own prior turn had primed the word "remember", so the session never landed in the real
+  lifts data at all -- invisible to /recentlifts, uncorrectable, and unavailable to any real-data lookup, only
+  a vague memory paragraph. The test that matters is what the CURRENT message itself contains: real
+  sets/reps/weight for something just done means "log_lift" (log the session), full stop -- "remember" is
+  reserved for a message that is ONLY describing a standing plan/preference with no concrete just-performed
+  numbers (see "remember" below for that case, and its own matching CRITICAL note on this exact confusion).
+  Nothing stops the user from ALSO wanting the routine remembered going forward -- if the message clearly asks
+  for both ("log that, and remember it as my go-to Visa pull day"), prefer "log_lift" for this turn (the
+  concrete numbers need to land as a real session) and let a short follow-up capture the "remember" part
+  separately, the same "don't guess at the skipped intent's fields" discipline as the log_workout/log_vitals
+  overlap above.
 - "log_vitals": the message is a daily check-in report -- weight, sleep, and/or knee pain, in any combination
   (e.g. "weight 76.6, slept 5.5 hours, knee 2/10", "76.4kg today"). Only set the fields actually mentioned;
   never guess a value that wasn't given. This is distinct from log_workout -- a message can report vitals
@@ -659,6 +677,17 @@ Deciding the intent:
   for one-off facts that don't need to persist (e.g. "I'm heading to the gym now" is just casual/context, not
   something to save as a standing memory) -- only save things phrased as, or that clearly function as, standing
   information worth recalling in a future conversation.
+  CRITICAL, same real bug as log_lift's own matching note above: never classify a message as "remember" just
+  because Morrow's OWN preceding reply used the word "remember" in a question (e.g. "want me to remember your
+  Visa pull day routine going forward?") -- a "yes" or a detailed answer to that question describing an actual
+  session that was just done, with real sets/reps/weight, is "log_lift" (or "log_workout"/"log_vitals" for
+  those domains), not "remember". Only classify as "remember" when the message itself is stating a standing
+  routine/plan/preference in the abstract, with no concrete just-performed numbers attached to a specific
+  session -- e.g. "remember that my Visa pull day is pull-ups, rows, and lat pulldowns" (a template for future
+  sessions, nothing to log today) is "remember", but "yesterday I did pull-ups 10x3, v-bar rows 35kg 8x3 at
+  Visa" (a real session that happened) is "log_lift" even if it's ALSO establishing what a "Visa pull day"
+  means going forward. When genuinely both apply, prefer logging the real session this turn (see log_lift's
+  note above).
 - "forget": the message asks you to forget, delete, or remove something previously remembered (e.g. "forget
   the Bugis gym plan", "that goal doesn't apply anymore, drop it"). Match it to exactly one label in the memory
   list the same way a correction matches a recent item -- if nothing clearly matches, or more than one
@@ -1330,7 +1359,12 @@ TELEGRAM_FORMATTING_NOTE = (
     "monospace column alignment (e.g. two or three rows of this-period-vs-last-period numbers) -- most "
     "replies don't need one. Plain unicode arrows (↑ for an increase, ↓ for a decrease, → for roughly flat) "
     "are welcome in place of writing \"increased\"/\"decreased\" every time. Use all of this sparingly -- it "
-    "should read like a person highlighting the one thing that matters, not a decorated report."
+    "should read like a person highlighting the one thing that matters, not a decorated report. When you "
+    "want a line break, write an actual line break in your output -- never the two literal characters "
+    "backslash-n as a stand-in for one, even if you're echoing or closely paraphrasing something from the "
+    "conversation history above that happens to show that literal sequence (that's just how a real newline "
+    "looks once it's been serialized into the JSON you were handed, not a literal string the reply should "
+    "reproduce)."
 )
 
 
@@ -1529,6 +1563,17 @@ real knowledge of how today's going ("you're already over target today, but bare
 today, quiet one so far") instead of talking in a vacuum -- use it when it's actually relevant to what they \
 said, don't force it into every reply. Every number in it is already correct and final; restate it, never \
 recompute, re-estimate, or "correct" it.
+- "recent_lifts": real logged gym-exercise rows (exercise, location, sets, effort, context_notes, lift_date), \
+most recent first. THIS is the real source of truth for any question about what a specific gym day/routine \
+actually involved ("what's my push day at Visa look like", "what did I do for pull day last time") -- ground \
+exact sets/reps/weight/exercise-name answers in these rows, never in the durable-memory prose or in your own \
+paraphrase of something said earlier in the conversation history. A memory entry may describe a routine in \
+general terms (e.g. "pull day at Visa is pull-ups, rows, lat pulldowns") -- that's fine for naming WHICH \
+exercises belong to a routine, but the exact numbers for what was actually done on a given day must come from \
+recent_lifts, not be invented or half-remembered from context. This matters because giving different exact \
+numbers to the same question asked twice in one conversation is a real observed bug -- if recent_lifts simply \
+doesn't have the session being asked about, say so plainly (e.g. "I don't have an exact logged session for \
+that yet") rather than guessing or reconstructing one from memory/conversation text.
 
 The bot's real command surface (never deny something on this list, and never invent a capability that isn't \
 on it): {COMMAND_LIST}
@@ -1549,7 +1594,7 @@ message (or use the matching command) and you'll do it for real -- don't pretend
 
 
 def answer_casually(message: str, recent_messages: list | None = None, memory_list: list | None = None,
-                     today_snapshot: dict | None = None) -> str:
+                     today_snapshot: dict | None = None, recent_lifts: list | None = None) -> str:
     """Dedicated call for the 'casual' intent -- genuinely open-ended
     conversation (small talk, catching up, venting, asking for advice, a
     question answerable from context/memory), pulled OUT of parse_message's
@@ -1568,18 +1613,26 @@ def answer_casually(message: str, recent_messages: list | None = None, memory_li
     today_snapshot: {{"balance": <db.get_status(chat_id) dict>, "today":
     <rundown._day_stats_payload(chat_id, today) dict>}} -- real numbers,
     never estimated, same discipline as every other narration call here.
-    Never raises -- callers should catch and fall back to parse_message's
-    own casual_reply field (or a generic line) the same way rundown/
-    day_stats fall back to their own deterministic text on failure."""
+    recent_lifts (see lifts._recent_lifts_for_narration): real logged
+    gym-exercise rows, most recent first -- what grounds a gym-routine
+    question ("what's my push day at Visa look like") in real data instead
+    of the model freely narrating from memory prose, which was a real
+    observed bug (exact numbers drifting between successive identical
+    questions in the same conversation). Never raises -- callers should
+    catch and fall back to parse_message's own casual_reply field (or a
+    generic line) the same way rundown/day_stats fall back to their own
+    deterministic text on failure."""
     client = _get_client()
     recent_messages = recent_messages or []
     memory_list = memory_list or []
     today_snapshot = today_snapshot or {}
+    recent_lifts = recent_lifts or []
     user_content = (
         f"{_today_context()}\n\n"
         f"Recent conversation history (oldest first):\n{json.dumps(recent_messages)}\n\n"
         f"Durable memory:\n{json.dumps(memory_list)}\n\n"
         f"today_snapshot:\n{json.dumps(today_snapshot)}\n\n"
+        f"recent_lifts:\n{json.dumps(recent_lifts)}\n\n"
         f"Message: {message}"
     )
     resp = client.messages.create(

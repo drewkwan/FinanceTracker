@@ -30,6 +30,20 @@ trend. This module is what actually turns that syntax into the matching
 Telegram HTML tags, safely, for freeform model text AND for Morrow's own
 deterministic confirmation strings (which never use that syntax, and pass
 through unchanged except for entity-escaping).
+
+Also normalizes literal backslash-n: a real observed bug where at least
+two of Morrow's own narrative replies contained the two literal characters
+"\n" as visible text instead of an actual line break. The conversation
+history fed into narration prompts (see ai.answer_casually) is JSON-
+serialized, which turns a real newline inside a PRIOR turn's text into
+that same two-character escape sequence within the JSON string -- when the
+model closely echoes or paraphrases a near-identical earlier reply, it can
+reproduce that raw serialized form verbatim instead of "decoding" it back
+into a real newline. Fixed with a prompt instruction too (see
+TELEGRAM_FORMATTING_NOTE), but a prompt instruction alone already failed
+once for a structurally similar bug (events defaulting to "delete" -- see
+events.py's docstring), so this is the same defense-in-depth: a normalize
+step here catches it even if the model ignores or forgets the instruction.
 """
 
 import html
@@ -41,6 +55,13 @@ import re
 _FENCE_RE = re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", re.DOTALL)
 _CODE_RE = re.compile(r"`([^`\n]+)`")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+# Literal backslash-n (or backslash-r-backslash-n) as two/four visible
+# characters, NOT an actual newline -- see the module docstring above for
+# why this shows up at all. Deliberately global/unconditional: this bot's
+# own text (deterministic confirmations, prompts) never has a legitimate
+# reason to send a literal "\n" as content a user should read as-is, so
+# there's no real case this could wrongly mangle.
+_LITERAL_NEWLINE_RE = re.compile(r"\\r\\n|\\n")
 
 
 def to_telegram_html(text: str | None) -> str | None:
@@ -53,9 +74,13 @@ def to_telegram_html(text: str | None) -> str | None:
     touches *, `, or the ``` fence markers, escaping first and promoting
     second is always safe and order-independent for anything this bot
     actually sends -- plain text with none of these markers just comes back
-    with &/</> escaped and is otherwise unchanged."""
+    with &/</> escaped and is otherwise unchanged. The literal-backslash-n
+    normalization runs first of all, before escaping -- it's fixing up a
+    real newline that got flattened to text, not something that needs
+    HTML-safety treatment itself."""
     if text is None:
         return text
+    text = _LITERAL_NEWLINE_RE.sub("\n", text)
     escaped = html.escape(text, quote=False)
     escaped = _FENCE_RE.sub(lambda m: f"<pre>{m.group(1).strip()}</pre>", escaped)
     escaped = _CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", escaped)

@@ -368,6 +368,58 @@ def test_correction_can_edit_a_lifts_sets_and_undo(monkeypatch):
     assert db.get_lift(CHAT, lift_id)["sets"] == original_sets
 
 
+# ---------- narration grounding: real data for gym-routine questions ----------
+# Regression guards for a real observed bug: gym-routine questions ("what's
+# my push day at Visa look like") were answered by freely narrating from the
+# memory-table prose blob instead of real logged rows, so exact sets/reps/
+# weight drifted between successive near-identical questions in the same
+# conversation. See ai.answer_casually and handlers._casual_reply_text.
+
+def test_recent_lifts_for_narration_returns_full_row_detail():
+    from lifts import _recent_lifts_for_narration
+    db.add_lift(CHAT, "pull-ups", "Visa gym", [{"reps": 10, "load": None}] * 3,
+                effort="felt strong", context_notes="no warm-up")
+    rows = _recent_lifts_for_narration(CHAT)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["exercise"] == "pull-ups"
+    assert row["location"] == "Visa gym"
+    assert row["sets"] == [{"reps": 10, "load": None}] * 3
+    assert row["effort"] == "felt strong"
+    assert row["context_notes"] == "no warm-up"
+    assert row["lift_date"] == db.today_str()
+
+
+def test_recent_lifts_for_narration_is_most_recent_first_and_respects_limit():
+    from lifts import _recent_lifts_for_narration
+    for i in range(3):
+        db.add_lift(CHAT, f"exercise {i}", "Visa gym", [{"reps": 10, "load": None}])
+    rows = _recent_lifts_for_narration(CHAT, limit=2)
+    assert len(rows) == 2
+    assert rows[0]["exercise"] == "exercise 2"  # most recent first
+
+
+def test_casual_reply_text_passes_recent_lifts_to_answer_casually(monkeypatch):
+    """End-to-end: the 'casual' intent dispatch must ground answer_casually
+    in real logged lifts, not just conversation history/memory -- otherwise
+    a gym-routine question still gets freely narrated from prose."""
+    import handlers
+
+    db.get_or_create_user(CHAT)
+    db.add_lift(CHAT, "pull-ups", "Visa gym", [{"reps": 10, "load": None}] * 3)
+    captured = {}
+
+    def fake_answer_casually(message, recent_messages=None, memory_list=None, today_snapshot=None,
+                              recent_lifts=None):
+        captured["recent_lifts"] = recent_lifts
+        return "Last Visa pull day was pull-ups 10x3."
+
+    monkeypatch.setattr(handlers.ai, "answer_casually", fake_answer_casually)
+    _run(handlers._casual_reply_text(CHAT, "what's my push day at visa look like", [], [], None))
+    assert captured["recent_lifts"]
+    assert captured["recent_lifts"][0]["exercise"] == "pull-ups"
+
+
 def test_correction_edit_lift_with_nothing_set_asks_what_to_fix(monkeypatch):
     db.get_or_create_user(CHAT)
     lift_id = db.add_lift(CHAT, "squat", "Visa gym", [{"reps": 5, "load": "90kg"}])

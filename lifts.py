@@ -29,6 +29,28 @@ def _recent_lifts_for_ai(chat_id: int) -> list:
     ]
 
 
+def _recent_lifts_for_narration(chat_id: int, limit: int = 40) -> list:
+    """Real logged-lift rows for ai.answer_casually to ground gym-routine
+    questions in (e.g. "what's my push day at Visa look like") -- the same
+    "real numbers in, never guessed" discipline as day_stats/rundown,
+    applied here because these questions were being answered by freely
+    narrating from the loose memory-table prose blob (or conversation
+    history) instead, causing exact sets/reps/weight to drift between
+    successive near-identical questions in the same conversation -- a real
+    observed bug. Deliberately a larger pool than _recent_lifts_for_ai's
+    correction-matching 8 (narration needs enough history to actually
+    answer "what does my push day look like", not just the last couple of
+    entries) and fuller per-row detail (effort, context_notes) a narrated
+    answer can actually use, versus just what a correction needs to
+    identify one row by id."""
+    rows = db.get_recent_lifts(chat_id, limit=limit)
+    return [
+        {"exercise": r["exercise"], "location": r["location"], "sets": r["sets"],
+         "effort": r.get("effort"), "context_notes": r.get("context_notes"), "lift_date": r["lift_date"]}
+        for r in rows
+    ]
+
+
 def _last_lift_text(chat_id: int, exercise: str, exclude_id: int) -> str | None:
     """Finds the most recent OTHER logged lift with the same exercise name
     (case-insensitive exact match), if any, within the recent pool
