@@ -242,8 +242,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Cross-domain synthesis (section 04 of the plan) -- real 7-day
         # figures computed in code, handed to Claude only to narrate, same
         # "never let the model guess a number" discipline as show_balance.
+        # narrate=False -- this text is ALREADY a full narration
+        # (ai.answer_with_rundown), so a second companion-voice pass
+        # (see replies._reply) would be redundant and risks the second
+        # pass quietly drifting from the first pass's real numbers.
         context.chat_data.pop(PENDING_KEY, None)
-        await _reply(update, chat_id, await _rundown_reply_text(chat_id))
+        await _reply(update, chat_id, await _rundown_reply_text(chat_id), narrate=False)
         return
 
     if intent == "day_stats":
@@ -252,8 +256,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # docstring for the real bug this replaces: a single-day calorie
         # question used to be "casual", which had the model re-derive the
         # sum/subtraction itself from raw context on every ask.
+        # narrate=False -- ai.answer_with_day_stats already narrated this
+        # from the real payload; a second pass would be redundant and
+        # risks drifting from the first pass's real numbers (see the
+        # 'rundown' branch above for the same reasoning).
         context.chat_data.pop(PENDING_KEY, None)
-        await _reply(update, chat_id, await _day_stats_reply_text(chat_id, parsed.get("day_stats_days_ago")))
+        await _reply(update, chat_id, await _day_stats_reply_text(chat_id, parsed.get("day_stats_days_ago")),
+                     narrate=False)
         return
 
     if intent == "log_meal":
@@ -375,10 +384,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # room to actually engage, not parse_message's own casual_reply
         # field (kept only as this call's own fallback -- see
         # _casual_reply_text's docstring).
+        # narrate=False -- ai.answer_casually already IS the companion
+        # voice (that's its whole purpose); a second narrate_reply pass on
+        # top of it would be redundant.
         context.chat_data.pop(PENDING_KEY, None)
         reply = await _casual_reply_text(chat_id, merged_text, recent_messages, memory_list,
                                           parsed.get("casual_reply"))
-        await _reply(update, chat_id, reply)
+        await _reply(update, chat_id, reply, narrate=False)
         return
 
     if intent != "log_expense":

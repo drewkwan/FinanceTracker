@@ -174,6 +174,32 @@ def test_natural_language_rundown_replies_with_synthesis(monkeypatch):
     assert update.message.replies[-1] == "You played tennis this week, nice."
 
 
+def test_natural_language_rundown_reply_is_not_narrated_a_second_time(monkeypatch):
+    """Regression guard: handlers.py must pass narrate=False for the
+    'rundown' intent (see replies._reply's docstring) -- ai.answer_with_rundown
+    output is already a full narration, and running it back through
+    ai.narrate_reply would be redundant and risks a second pass quietly
+    drifting from the first pass's real numbers. Uses a non-identity fake
+    narrate_reply (unlike the autouse passthrough fixture) so a regression
+    here can actually be detected."""
+    db.get_or_create_user(CHAT)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "rundown", "clarification_question": None, "casual_reply": None,
+            **_no_op_extra_fields(),
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    monkeypatch.setattr(bot.ai, "answer_with_rundown", lambda payload: "You played tennis this week, nice.")
+    monkeypatch.setattr(bot.ai, "narrate_reply", lambda text, *a, **kw: f"RE-NARRATED: {text}")
+    update = FakeUpdate(CHAT, text="how am I doing this week?")
+    _run(bot.handle_text(update, FakeContext()))
+    assert update.message.replies[-1] == "You played tennis this week, nice."
+
+
 def test_natural_language_rundown_logs_to_conversation_history(monkeypatch):
     """Regression guard: _reply (not a bare reply_text) must be used so the
     rundown reply lands in the rolling messages table like every other
@@ -346,6 +372,19 @@ def test_natural_language_day_stats_replies_with_synthesis_for_the_right_day(mon
     assert update.message.replies[-1] == "Yesterday you had about 1050 kcal, mostly from the mala."
     assert captured["payload"]["day"] == yesterday
     assert captured["payload"]["meals"]["total_calories_estimate"] == 1050
+
+
+def test_natural_language_day_stats_reply_is_not_narrated_a_second_time(monkeypatch):
+    """Same regression guard as rundown's, for narrate=False on the
+    'day_stats' intent -- see that test's docstring."""
+    db.get_or_create_user(CHAT)
+
+    monkeypatch.setattr(bot.ai, "parse_message", _fake_parse_message_day_stats(0))
+    monkeypatch.setattr(bot.ai, "answer_with_day_stats", lambda payload: "Nothing logged today yet.")
+    monkeypatch.setattr(bot.ai, "narrate_reply", lambda text, *a, **kw: f"RE-NARRATED: {text}")
+    update = FakeUpdate(CHAT, text="stats for today")
+    _run(bot.handle_text(update, FakeContext()))
+    assert update.message.replies[-1] == "Nothing logged today yet."
 
 
 def test_natural_language_day_stats_logs_to_conversation_history(monkeypatch):

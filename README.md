@@ -380,6 +380,51 @@ If the model doesn't classify a message as *any* known intent — not even
 plain command-menu fallback instead, so a genuine misclassification isn't
 quietly answered as if it were small talk.
 
+## How Morrow's companion voice works on every reply, not just casual chat
+
+`answer_casually` gave open-ended conversation real personality, but for a
+long time everything else — a log confirmation, a correction, a clarifying
+question, an "I didn't catch that" — stayed a flat, hard-coded string. That
+turned out to be most of what Morrow actually says day to day, so logging
+still read like a receipt printer even after `answer_casually` shipped:
+the companion voice only ever fired for the minority of messages
+classified as pure small talk.
+
+`ai.narrate_reply` closes that gap. Every reply sent on the free-text/
+command surface passes through exactly one chokepoint, `replies._reply`,
+and by default (`narrate=True`) that chokepoint now runs the reply through
+`narrate_reply` before it goes out — so `"Logged: pull-ups 10x3"` comes
+back sounding like an actual companion responding, not a bot printing a
+line. Critically, this is a **restyle, not a rewrite**: the content (every
+number, id, date, and fact) is already correct and final by the time this
+call runs — computed the exact same deterministic way it always was —
+and `narrate_reply`'s only job is delivery. It's told explicitly to never
+drop, round, or invent a number/id/fact, never drop an actionable
+instruction like "Reply 'undo' if that's wrong", and to keep a plain log
+short (a line or two) rather than padding it into a paragraph. It's fed
+the same grounding context as `answer_casually` (conversation history,
+memory, `today_snapshot`, `recent_lifts`) so a confirmation can actually
+reference something relevant instead of reading like a stateless template.
+
+A handful of replies are already full narrations in their own right —
+`answer_casually` (`casual`), `answer_with_rundown` (`rundown`),
+`answer_with_day_stats` (`day_stats`) — and those are sent with
+`narrate=False` so they're not run through a second, redundant pass that
+could quietly drift from the first pass's real numbers. Everything else —
+every domain module's log/correction/undo/clarification replies, and the
+`show_balance`/`show_recent`/`show_tasks`/`show_events`/`show_reminders`/
+`show_memory` intents — gets the companion treatment automatically, since
+they all already funnel through `_reply` with no code changes needed at
+each call site.
+
+If `narrate_reply` itself fails (API hiccup, rate limit), `_reply` falls
+back to sending the original deterministic text unchanged — same "never go
+silent, never say something false" discipline as every other narration
+call in this codebase. This does mean essentially every reply now costs
+one extra `CLAUDE_NARRATION_MODEL` call (a bit more latency, a small
+ongoing API cost) — a deliberate tradeoff for the bot actually feeling
+like a companion at all times rather than only during open-ended chat.
+
 ## How the morning briefing works
 
 Every day at a fixed local time (`MORNING_BRIEFING_HOUR`/`MORNING_BRIEFING_MINUTE`

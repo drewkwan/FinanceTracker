@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+import ai
 import config
 import db
 import fx
@@ -40,6 +41,24 @@ def _no_real_network(monkeypatch):
             "network calls must not happen in tests."
         )
     monkeypatch.setattr(fx, "get_rate", _fail_if_called)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _passthrough_narration(monkeypatch):
+    """replies._reply now runs EVERY reply through ai.narrate_reply by
+    default (see replies.py's module docstring) -- without this fixture,
+    every single test that sends a reply on the free-text/command surface
+    (hundreds of them, across nearly every test file) would attempt a real
+    network call to the Anthropic API, the exact thing _no_real_network
+    above exists to prevent for fx.get_rate. Default every test to a pure
+    passthrough (the deterministic text, unchanged) so the large existing
+    body of tests asserting exact confirmation wording keeps working
+    without each one having to know or care that narration exists. A test
+    that actually wants to exercise the narration mechanism itself
+    overrides this within its own body (monkeypatch stacking: the later
+    setattr wins) -- see tests/test_replies.py."""
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *args, **kwargs: text)
     yield
 
 

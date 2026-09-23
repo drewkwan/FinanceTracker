@@ -1644,6 +1644,91 @@ def answer_casually(message: str, recent_messages: list | None = None, memory_li
     return resp.content[0].text.strip()
 
 
+# ---------- narrate_reply: the companion voice for EVERY reply, not just casual ----------
+# answer_casually gave open-ended conversation real personality, but everything else Morrow
+# sends -- a log confirmation, a correction, a clarifying question, an "I didn't catch that" --
+# stayed a flat, hard-coded string, which is most of what the bot actually says day to day.
+# That's the real reason logging still read as "standard" even after answer_casually shipped:
+# the companion voice only ever fired on the minority of messages classified as pure chit-chat.
+# narrate_reply closes that gap by running EVERY reply (see replies._reply, the one chokepoint
+# on the free-text/command reply path) through the same restyling treatment -- but as a
+# RESTYLE, not a rewrite: the content (every number, id, date, fact) is already correct and
+# final by the time this call runs, computed the same deterministic way it always was; this
+# call's only job is how it's said, the same "real numbers in, model only narrates" discipline
+# used everywhere else in this codebase, just applied to delivery instead of substance.
+
+NARRATE_REPLY_SYSTEM_PROMPT = f"""You are Morrow, the person's personal companion and tracker, replying on \
+Telegram. This call has ONE job: take an already-written, already-correct reply and say it the way an actual \
+attentive companion would -- not rewrite what happened, just how it's said. Every fact, number, id (like \
+"#7"), date, and name in the reply you're given is ALREADY correct and final -- your job is delivery, not \
+content.
+
+Rules, in order of importance:
+1. NEVER drop, change, round, or invent a number, id, date, name, or fact that's in the original reply. If \
+you're not sure how to work something in naturally, just state it plainly rather than leaving it out -- an \
+omission here is a real bug (the user loses real information), not just an awkward sentence.
+2. NEVER drop an actionable instruction that's in the original -- especially "Reply 'undo' if that's wrong" \
+or any similar follow-up prompt, or a usage/command hint. Keep the exact meaning even if you reword it.
+3. NEVER claim any action beyond what the original reply already states happened -- don't add "I've also...", \
+don't imply you did something extra that isn't already stated.
+4. Match the length and register to what's actually there. A single plain log ("Logged: chicken rice -- ~650 \
+kcal") stays ONE short, natural line or two -- real personality, not padding it into a paragraph. Something \
+with more real content already in it (a multi-item log, a same-exercise comparison, a correction, a richer \
+confirmation) can be a bit more conversational, but stays concise -- this is a restyle of an existing reply, \
+never a new essay.
+5. Use the recent conversation history, durable memory, today_snapshot, and recent_lifts you're given the \
+same way a casual reply would -- for continuity and personality (referencing something relevant, matching the \
+person's own register), never to add or contradict a fact that isn't already in the original reply.
+6. A reply that's a genuine question (a clarification, "what day is that on?") or an honest miss ("I didn't \
+catch what you ate") should still read like an actual person asking or admitting it, not a form-validation \
+error -- but stays exactly that: a real question or a real admission, never dressed up as knowing something \
+it doesn't.
+
+{TELEGRAM_FORMATTING_NOTE}"""
+
+
+def narrate_reply(deterministic_text: str, recent_messages: list | None = None, memory_list: list | None = None,
+                   today_snapshot: dict | None = None, recent_lifts: list | None = None) -> str:
+    """Rewrites an already-correct, deterministically-computed reply (a log
+    confirmation, a correction confirmation, a clarifying question, a
+    show_balance/show_recent/... answer, an undo confirmation, an evening
+    nudge, ...) in Morrow's actual companion voice before it's sent -- see
+    the module-level comment above and replies._reply's docstring for why
+    this now runs on every reply by default, not just the 'casual' intent.
+    This call NEVER changes what happened, only how it's said --
+    deterministic_text is the real, already-correct content; see
+    NARRATE_REPLY_SYSTEM_PROMPT for the exact rules (never drop a
+    number/id/fact, never drop an 'undo' offer, never claim an extra
+    action). Same context shape as answer_casually
+    (recent_messages/memory_list/today_snapshot/recent_lifts) so it can
+    actually sound like a continuation of the same conversation, not a
+    stateless rewrite. Never raises -- callers (replies._reply) fall back
+    to deterministic_text unchanged on any failure, the same "never go
+    silent, never say something false" discipline as every other narration
+    call here."""
+    client = _get_client()
+    recent_messages = recent_messages or []
+    memory_list = memory_list or []
+    today_snapshot = today_snapshot or {}
+    recent_lifts = recent_lifts or []
+    user_content = (
+        f"{_today_context()}\n\n"
+        f"Recent conversation history (oldest first):\n{json.dumps(recent_messages)}\n\n"
+        f"Durable memory:\n{json.dumps(memory_list)}\n\n"
+        f"today_snapshot:\n{json.dumps(today_snapshot)}\n\n"
+        f"recent_lifts:\n{json.dumps(recent_lifts)}\n\n"
+        f"The reply about to be sent (already correct and final -- restyle it, never change its content):\n"
+        f"{deterministic_text}"
+    )
+    resp = client.messages.create(
+        model=config.CLAUDE_NARRATION_MODEL,
+        max_tokens=400,
+        system=NARRATE_REPLY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    return resp.content[0].text.strip()
+
+
 def _clarify_fallback(message: str) -> dict:
     return {
         "intent": "clarification",

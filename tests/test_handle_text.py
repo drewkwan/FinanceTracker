@@ -625,6 +625,29 @@ def test_casual_intent_uses_the_dedicated_answer_casually_call(monkeypatch):
     assert "daily_target" in captured["today_snapshot"]["balance"]
 
 
+def test_casual_reply_is_not_narrated_a_second_time(monkeypatch):
+    """Regression guard: handlers.py must pass narrate=False for the
+    'casual' intent (see replies._reply's docstring) -- ai.answer_casually
+    output IS the companion voice already; a second ai.narrate_reply pass
+    on top of it would be redundant. Uses a non-identity fake narrate_reply
+    (unlike the autouse passthrough fixture) so a regression here can
+    actually be detected."""
+    db.get_or_create_user(CHAT)
+    context = FakeContext()
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return _casual_parse_response(casual_reply="fallback text, should not be used")
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    monkeypatch.setattr(bot.ai, "answer_casually", lambda *a, **kw: "Hey! Doing well, how about you?")
+    monkeypatch.setattr(bot.ai, "narrate_reply", lambda text, *a, **kw: f"RE-NARRATED: {text}")
+    update = FakeUpdate(CHAT, "hey how's it going")
+    _run(bot.handle_text(update, context))
+    assert update.message.replies[-1] == "Hey! Doing well, how about you?"
+
+
 def test_casual_intent_falls_back_to_parsed_casual_reply_if_dedicated_call_fails(monkeypatch):
     """Same discipline as rundown/day_stats: if the dedicated narration call
     itself fails, fall back to a deterministic-enough alternative rather
