@@ -1148,6 +1148,28 @@ def edit_vitals_date(chat_id: int, vitals_id: int, new_date_str: str) -> dict | 
     return get_vitals(chat_id, vitals_id)
 
 
+def edit_vitals(chat_id: int, vitals_id: int, new_weight_kg=_UNSET, new_sleep_hours=_UNSET,
+                 new_knee_pain=_UNSET, new_notes=_UNSET) -> dict | None:
+    """Corrects a field on an already-logged check-in -- most commonly a
+    mis-typed weight/sleep/knee number -- without deleting and relogging
+    from scratch. Same _UNSET "only touch what's passed" discipline as
+    edit_meal/edit_workout/edit_lift -- see db._UNSET's docstring above."""
+    row = get_vitals(chat_id, vitals_id)
+    if row is None:
+        return None
+    final_weight = row["weight_kg"] if new_weight_kg is _UNSET else new_weight_kg
+    final_sleep = row["sleep_hours"] if new_sleep_hours is _UNSET else new_sleep_hours
+    final_knee = row["knee_pain"] if new_knee_pain is _UNSET else new_knee_pain
+    final_notes = row["notes"] if new_notes is _UNSET else new_notes
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE vitals SET weight_kg = ?, sleep_hours = ?, knee_pain = ?, notes = ? "
+            "WHERE id = ? AND chat_id = ?",
+            (final_weight, final_sleep, final_knee, final_notes, vitals_id, chat_id),
+        )
+    return get_vitals(chat_id, vitals_id)
+
+
 def delete_vitals(chat_id: int, vitals_id: int) -> dict | None:
     row = get_vitals(chat_id, vitals_id)
     if row is None:

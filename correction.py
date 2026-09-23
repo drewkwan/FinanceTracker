@@ -71,21 +71,21 @@ CORRECTION_ACTIONS = {
 # due_time, the same shape log_task already extracts for a new to-do) since
 # it can't reuse edit_date's backward-only days_ago math (see ai.py's
 # PARSE_SYSTEM_PROMPT correction rules).
-SIMPLE_DOMAIN_ACTIONS = {"edit_date", "delete"}
 TASK_DOMAIN_ACTIONS = {"mark_done", "edit_task", "delete"}
-# meal/workout/lift each get their own bucket, one step wider than vitals' plain
-# SIMPLE_DOMAIN_ACTIONS -- edit_meal/edit_workout/edit_lift (flexible field corrections,
-# mirroring edit_task) exist specifically so a photo- or text-logged entry that came out
-# wrong (an item that wasn't really eaten, a workout's calories_burned read wrong off a
-# screenshot, a lift's sets mis-typed) can be fixed in place without forcing a
-# delete-and-relog round trip. vitals doesn't get one yet -- no observed real-world need
-# there so far, unlike these three (see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT for the meal
-# case, and a real observed bad interaction for workout/lift: "correct the calories out to
-# 2862" / "update the v bar pulls to 10x8x1, 12x8x2" both had no supported action to land
-# on, forcing the model into either a nonsense date-clarification question or a dead end).
+# meal/workout/lift/vitals each get the same flexible-edit bucket -- edit_meal/
+# edit_workout/edit_lift/edit_vitals (flexible field corrections, mirroring edit_task) exist
+# specifically so a photo- or text-logged entry that came out wrong (an item that wasn't
+# really eaten, a workout's calories_burned read wrong off a screenshot, a lift's sets
+# mis-typed, a mis-typed weight/sleep/knee number) can be fixed in place without forcing a
+# delete-and-relog round trip (see ai.py's PHOTO_CLASSIFY_SYSTEM_PROMPT for the meal case,
+# and a real observed bad interaction for workout/lift: "correct the calories out to 2862" /
+# "update the v bar pulls to 10x8x1, 12x8x2" both had no supported action to land on,
+# forcing the model into either a nonsense date-clarification question or a dead end --
+# vitals had the exact same gap until edit_vitals closed it).
 MEAL_DOMAIN_ACTIONS = {"edit_date", "edit_meal", "delete"}
 WORKOUT_DOMAIN_ACTIONS = {"edit_date", "edit_workout", "delete"}
 LIFT_DOMAIN_ACTIONS = {"edit_date", "edit_lift", "delete"}
+VITALS_DOMAIN_ACTIONS = {"edit_date", "edit_vitals", "delete"}
 # event supports "reschedule" and "delete" -- an event has no "done" state
 # (see events.py's design), so those are the only two things a correction
 # can do to one. "reschedule" is its own action, not "edit_date", because an
@@ -122,9 +122,11 @@ _DOMAIN_OPS = {
               "get": db.get_lift, "edit_date": db.edit_lift_date, "delete": db.delete_lift,
               "restore": db.restore_deleted_lift, "line": _lift_line, "edit_lift": db.edit_lift},
     "vitals": {"noun": "check-in", "recent_cmd": "/recentvitals", "date_field": "vitals_date",
-                "actions": SIMPLE_DOMAIN_ACTIONS, "actions_desc": "only moving the date or deleting one",
+                "actions": VITALS_DOMAIN_ACTIONS,
+                "actions_desc": "moving the date, correcting a field (weight/sleep/knee pain/notes), or "
+                                 "deleting one",
                 "get": db.get_vitals, "edit_date": db.edit_vitals_date, "delete": db.delete_vitals,
-                "restore": db.restore_deleted_vitals, "line": _vitals_line},
+                "restore": db.restore_deleted_vitals, "line": _vitals_line, "edit_vitals": db.edit_vitals},
     "task": {"noun": "to-do", "recent_cmd": "/tasks",
               "actions": TASK_DOMAIN_ACTIONS,
               "actions_desc": "only marking one done, editing its title/due date/notes, or deleting one",
@@ -415,6 +417,43 @@ async def _handle_simple_domain_correction(update: Update, context: ContextTypes
             "domain": domain, "action": "edit_lift", "expense_id": target_id,
             "old_exercise": old_exercise, "old_location": old_location, "old_sets": old_sets,
             "old_effort": old_effort, "old_context_notes": old_context_notes,
+        }
+        await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
+        return
+
+    if action == "edit_vitals":
+        # Corrects a field on an already-logged check-in -- most commonly a
+        # mis-typed weight/sleep/knee number -- without deleting and
+        # relogging from scratch. See ai.py's edit_vitals prompt rules.
+        new_weight = parsed.get("new_vitals_weight_kg")
+        new_sleep = parsed.get("new_vitals_sleep_hours")
+        new_knee = parsed.get("new_vitals_knee_pain")
+        new_notes = parsed.get("new_vitals_notes")
+
+        if all(v is None for v in (new_weight, new_sleep, new_knee, new_notes)):
+            await _reply(
+                update, chat_id,
+                f"What should I fix about that {noun} -- the weight, sleep, knee pain, or notes?"
+            )
+            return
+
+        edits = {}
+        if new_weight is not None:
+            edits["new_weight_kg"] = new_weight
+        if new_sleep is not None:
+            edits["new_sleep_hours"] = new_sleep
+        if new_knee is not None:
+            edits["new_knee_pain"] = new_knee
+        if new_notes is not None:
+            edits["new_notes"] = new_notes
+
+        old_weight, old_sleep = row["weight_kg"], row["sleep_hours"]
+        old_knee, old_notes = row["knee_pain"], row["notes"]
+        updated = ops["edit_vitals"](chat_id, target_id, **edits)
+        context.chat_data[LAST_CORRECTION_KEY] = {
+            "domain": domain, "action": "edit_vitals", "expense_id": target_id,
+            "old_weight_kg": old_weight, "old_sleep_hours": old_sleep,
+            "old_knee_pain": old_knee, "old_notes": old_notes,
         }
         await _reply(update, chat_id, f"Updated -- {ops['line'](updated)}. Reply 'undo' if that's wrong.")
         return
@@ -719,6 +758,13 @@ async def _revert_last_correction(update: Update, context: ContextTypes.DEFAULT_
                 chat_id, snap["expense_id"], new_exercise=snap["old_exercise"],
                 new_location=snap["old_location"], new_sets=snap["old_sets"],
                 new_effort=snap["old_effort"], new_context_notes=snap["old_context_notes"],
+            )
+            await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
+        elif action == "edit_vitals":
+            row = ops["edit_vitals"](
+                chat_id, snap["expense_id"], new_weight_kg=snap["old_weight_kg"],
+                new_sleep_hours=snap["old_sleep_hours"], new_knee_pain=snap["old_knee_pain"],
+                new_notes=snap["old_notes"],
             )
             await _reply(update, chat_id, f"Reverted -- back to {ops['line'](row)}.")
         return True

@@ -277,7 +277,7 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     compatibility; "balance" is different from the rest -- see below and the adjust_balance rule),
   "target_expense_id": integer or null (correction only -- MUST be an "id" from the matching recent-<domain>
     list; not applicable/always null for target_domain="balance", which has no recent-item list),
-  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "edit_workout" | "edit_lift" | "reschedule" | "adjust_balance" | "edit_unsupported_field" or null (correction only),
+  "correction_action": "edit_date" | "edit_currency" | "edit_amount" | "edit_description" | "edit_category" | "delete" | "mark_done" | "edit_task" | "edit_meal" | "edit_workout" | "edit_lift" | "edit_vitals" | "reschedule" | "adjust_balance" | "edit_unsupported_field" or null (correction only),
   "days_ago": integer or null (correction + edit_date only -- 0 = today, 1 = yesterday, 2 = two days ago, etc.
     up to 14. Extract WHICH day the user means as a plain count of days back -- for an explicit calendar date
     or weekday ("move it to the 18th"), compute this against "Today's actual date" given at the top of this
@@ -333,6 +333,14 @@ Respond with ONLY a JSON object, no other text, matching this shape:
     changes it),
   "new_lift_context_notes": string or null (correction + edit_lift only -- ONLY set if the message actually
     changes it),
+  "new_vitals_weight_kg": number or null (correction + edit_vitals only, target_domain="vitals" -- ONLY set
+    if the message actually corrects the weight),
+  "new_vitals_sleep_hours": number or null (correction + edit_vitals only -- ONLY set if the message actually
+    corrects the sleep hours),
+  "new_vitals_knee_pain": number or null (correction + edit_vitals only -- ONLY set if the message actually
+    corrects the knee pain rating),
+  "new_vitals_notes": string or null (correction + edit_vitals only -- ONLY set if the message adds/changes
+    a note),
   "new_event_in_days": integer or null (correction + reschedule only, target_domain="event" -- a plain count of
     days from today the event should move TO, computed against "Today's actual date is ..." the same way
     event_in_days works for a brand-new event -- 0 = today, 1 = tomorrow, etc. FORWARD-looking, never a
@@ -511,8 +519,9 @@ Deciding the intent:
   note above on resolving a bare number that matches BOTH a task id and an event id). Set target_expense_id to
   its "id". Only
   "expense" targets
-  support edit_currency/edit_amount/edit_description/edit_category -- for "vitals" targets, only "edit_date"
-  and "delete" are supported right now; for "meal" targets, "edit_date", "edit_meal" (a flexible items/
+  support edit_currency/edit_amount/edit_description/edit_category -- for "vitals" targets, "edit_date",
+  "edit_vitals" (a flexible weight/sleep/knee-pain/notes correction -- see below), and "delete" are
+  supported; for "meal" targets, "edit_date", "edit_meal" (a flexible items/
   calories correction -- see below), and "delete" are supported; for "workout" targets, "edit_date",
   "edit_workout" (a flexible activity/duration/distance/calories-burned/notes correction -- see below), and
   "delete" are supported; for "lift" targets, "edit_date", "edit_lift" (a flexible sets/location/effort/notes
@@ -527,9 +536,9 @@ Deciding the intent:
   "correct the calories out to 2862" (a workout's calories_burned, before edit_workout existed to handle it
   properly) got misclassified as correction_action="edit_date" with no day mentioned, producing a nonsense
   "which day did you mean?" question completely unrelated to what was actually asked. If the user wants a
-  field fixed that genuinely isn't in that domain's supported-actions list above (currently only vitals has a
-  real gap left), set correction_action="edit_unsupported_field" instead of guessing at the closest-sounding
-  valid action -- this produces an accurate "that kind of edit isn't supported yet" reply naming what IS
+  field fixed that genuinely isn't in that domain's supported-actions list above (e.g. an event's title/notes
+  have no dedicated edit action yet -- only "reschedule" and "delete" exist for events), set
+  correction_action="edit_unsupported_field" instead of guessing at the closest-sounding valid action -- this produces an accurate "that kind of edit isn't supported yet" reply naming what IS
   supported, instead of a confusing off-topic question. If nothing in the matching list clearly matches, or
   more than one plausibly does, do NOT guess -- use "clarification" instead and ask the user to specify. If a
   single message describes MORE THAN ONE correction at once, do NOT fall back to "casual" just because it's
@@ -606,6 +615,14 @@ Deciding the intent:
   new_lift_exercise/new_lift_location/new_lift_effort/new_lift_context_notes if the message specifically
   changes those too; leave them null otherwise. If the message is about a lift but it's unclear what actually
   changed, use "clarification" and ask what to fix.
+  correction_action="edit_vitals" (target_domain="vitals" only) corrects a field on an already-logged
+  check-in, WITHOUT deleting and relogging it from scratch -- the case this exists for is a mis-typed
+  weight/sleep/knee-pain number, or a note that needs fixing. Examples: "that was 76.0kg not 76.6" (a weight
+  correction), "I actually slept 7 hours, not 5.5" (a sleep correction), "knee was more like a 4 today" (a
+  knee-pain correction). Set ONLY the field(s) the message actually changes (new_vitals_weight_kg/
+  new_vitals_sleep_hours/new_vitals_knee_pain/new_vitals_notes) -- leave the rest null, meaning unchanged; a
+  message correcting just the weight sets ONLY new_vitals_weight_kg, not the others. If the message is about
+  a check-in but it's unclear what actually changed, use "clarification" and ask what to fix.
   target_domain="event" supports exactly two actions: "delete" and "reschedule" -- an event has no "done"
   state to set (see events.py's design: it's a flat, dated occurrence, not a to-do), so correction_action is
   NEVER "mark_done" for it. Phrasing like "the X-ray is done", "that appointment already happened", "cancel

@@ -48,6 +48,24 @@ def test_edit_vitals_date_clamps_future_to_today():
     assert row["vitals_date"] == db.today_str()
 
 
+def test_edit_vitals_only_touches_fields_passed():
+    """Regression test for a real gap: a mis-typed weight/sleep/knee number
+    had no way to be fixed without deleting and relogging the whole
+    check-in. edit_vitals' _UNSET "only touch what's passed" discipline
+    (same as edit_meal/edit_workout/edit_lift) must leave every other field
+    exactly as it was."""
+    vitals_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=5.5, knee_pain=2, notes="felt tight")
+    updated = db.edit_vitals(CHAT, vitals_id, new_weight_kg=76.0)
+    assert updated["weight_kg"] == 76.0
+    assert updated["sleep_hours"] == 5.5  # untouched
+    assert updated["knee_pain"] == 2  # untouched
+    assert updated["notes"] == "felt tight"  # untouched
+
+
+def test_edit_vitals_returns_none_for_missing_vitals():
+    assert db.edit_vitals(CHAT, 999999, new_weight_kg=76.0) is None
+
+
 def test_delete_and_restore_vitals_roundtrip():
     vitals_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=5.5, knee_pain=2)
     deleted = db.delete_vitals(CHAT, vitals_id)
@@ -289,3 +307,53 @@ def test_undo_reverts_a_vitals_date_edit(monkeypatch):
     undo_update = FakeUpdate(CHAT, text="undo")
     _run(bot.handle_text(undo_update, context))
     assert db.get_vitals(CHAT, vitals_id)["vitals_date"] == original_date
+
+
+# ---------- correction.py: edit_vitals dispatch ----------
+
+def test_correction_can_edit_vitals_weight_and_undo(monkeypatch):
+    """Regression test for a real gap: 'that was 76.0kg not 76.6' used to
+    have no supported action at all for a vitals target (only edit_date and
+    delete existed), the same shape of bug edit_workout/edit_lift were
+    added to fix for their own domains."""
+    db.get_or_create_user(CHAT)
+    vitals_id = db.add_vitals(CHAT, weight_kg=76.6, sleep_hours=5.5, knee_pain=2)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
+            "correction_action": "edit_vitals", "new_vitals_weight_kg": 76.0,
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    context = FakeContext()
+    edit_update = FakeUpdate(CHAT, text="that was 76.0kg not 76.6")
+    _run(bot.handle_text(edit_update, context))
+    assert db.get_vitals(CHAT, vitals_id)["weight_kg"] == 76.0
+    assert db.get_vitals(CHAT, vitals_id)["sleep_hours"] == 5.5  # untouched
+
+    undo_update = FakeUpdate(CHAT, text="undo")
+    _run(bot.handle_text(undo_update, context))
+    assert db.get_vitals(CHAT, vitals_id)["weight_kg"] == 76.6
+
+
+def test_correction_edit_vitals_with_nothing_set_asks_what_to_fix(monkeypatch):
+    db.get_or_create_user(CHAT)
+    vitals_id = db.add_vitals(CHAT, weight_kg=76.6)
+
+    def fake_parse_message(text, recent_expenses=None, recent_meals=None, recent_workouts=None,
+                            recent_vitals=None, recent_tasks=None, recent_messages=None, memory_list=None,
+                            recent_events=None, recent_lifts=None):
+        return {
+            "intent": "correction", "target_domain": "vitals", "target_expense_id": vitals_id,
+            "correction_action": "edit_vitals",
+            "clarification_question": None, "casual_reply": None,
+        }
+
+    monkeypatch.setattr(bot.ai, "parse_message", fake_parse_message)
+    update = FakeUpdate(CHAT, text="fix that check-in")
+    _run(bot.handle_text(update, FakeContext()))
+    assert "What should I fix" in update.message.replies[-1]

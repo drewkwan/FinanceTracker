@@ -170,14 +170,14 @@ natural-language pattern.
   meal was actually two days ago" or "delete that, I logged it twice" both
   resolve by natural language, with the same before/after confirmation and
   one-word `undo`. This applies to meals, workouts, lifts, and vitals
-  check-ins too. Vitals is the one domain without a field-level edit yet —
-  only moving the date or deleting an entry — so a request for anything
-  else there gets a clear "that kind of edit isn't supported yet" message
-  naming what actually is, rather than a confusing off-topic question or
-  being silently ignored.
-- **Meals, workouts, and lifts each get a field-level edit**, correcting
-  what's actually in an already-logged entry without deleting and
-  relogging from scratch:
+  check-ins too. A request for a field genuinely outside what's supported
+  for a domain (currently just an event's title/notes, since events only
+  support moving the day or deleting) gets a clear "that kind of edit isn't
+  supported yet" message naming what actually is, rather than a confusing
+  off-topic question or being silently ignored.
+- **Meals, workouts, lifts, and vitals check-ins each get a field-level
+  edit**, correcting what's actually in an already-logged entry without
+  deleting and relogging from scratch:
   - Meals: what was actually eaten/drunk — e.g. "minus the ramen noodles, I
     didn't have that" or "I also had a side salad". Morrow re-estimates
     calories fresh for the corrected item list (the same plausible-range
@@ -196,7 +196,10 @@ natural-language pattern.
     picture, not just the diff" discipline as a meal's item-list
     correction, not a delete-and-relog round trip for a mis-typed rep
     count.
-  All three reverse with one-word `undo` like every other correction.
+  - Vitals: weight, sleep hours, knee pain, or notes — e.g. "that was
+    76.0kg not 76.6" or "I actually slept 7 hours, not 5.5" — fixing a
+    mis-typed number on a check-in without deleting and relogging it.
+  All four reverse with one-word `undo` like every other correction.
 
 ## How structured lift logging works
 
