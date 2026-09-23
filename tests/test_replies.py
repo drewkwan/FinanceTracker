@@ -21,7 +21,8 @@ import ai
 import db
 from conftest import CHAT
 from test_meals_workouts import FakeUpdate
-from replies import _reply
+from test_morning import _FakeTickContext
+from replies import _reply, _send_proactive
 
 
 def _run(coro):
@@ -103,3 +104,54 @@ def test_reply_passes_real_grounding_context_to_narrate_reply(monkeypatch):
     assert any(m["content"] == "just finished pull day" for m in captured["recent_messages"])
     assert "balance" in captured["today_snapshot"] and "today" in captured["today_snapshot"]
     assert captured["recent_lifts"][0]["exercise"] == "pull-ups"
+
+
+# ---------- _send_proactive: same treatment for scheduled sends ----------
+# The morning briefing (morning.py) and evening nudge (nudges.py) have no
+# Update to reply to -- they're pushed by app.py's job_queue on a schedule,
+# not in response to a message -- so they go through this sibling of _reply
+# instead. Same narration-by-default, same fallback, same conversation-
+# history logging; see replies._send_proactive's own docstring.
+
+def test_send_proactive_narrates_by_default(monkeypatch):
+    db.get_or_create_user(CHAT)
+    context = _FakeTickContext()
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *a, **kw: f"(companion voice) {text}")
+    _run(_send_proactive(context, CHAT, "Good morning! Here's where things stand:"))
+    assert context.bot.sent == [(CHAT, "(companion voice) Good morning! Here's where things stand:")]
+
+
+def test_send_proactive_logs_the_narrated_text_to_conversation_history(monkeypatch):
+    db.get_or_create_user(CHAT)
+    context = _FakeTickContext()
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *a, **kw: "Morning! Nothing urgent today.")
+    _run(_send_proactive(context, CHAT, "Good morning! Here's where things stand:"))
+    stored = db.get_recent_messages(CHAT, limit=5)
+    assert stored[0]["content"] == "Morning! Nothing urgent today."
+
+
+def test_send_proactive_with_narrate_false_bypasses_narration_entirely(monkeypatch):
+    db.get_or_create_user(CHAT)
+    context = _FakeTickContext()
+    called = []
+
+    def fake_narrate_reply(text, *args, **kwargs):
+        called.append(text)
+        return "SHOULD NOT BE USED"
+
+    monkeypatch.setattr(ai, "narrate_reply", fake_narrate_reply)
+    _run(_send_proactive(context, CHAT, "Quiet day so far.", narrate=False))
+    assert not called
+    assert context.bot.sent == [(CHAT, "Quiet day so far.")]
+
+
+def test_send_proactive_falls_back_to_original_text_if_narration_fails(monkeypatch):
+    db.get_or_create_user(CHAT)
+    context = _FakeTickContext()
+
+    def fake_narrate_reply(text, *args, **kwargs):
+        raise ConnectionError("API blip")
+
+    monkeypatch.setattr(ai, "narrate_reply", fake_narrate_reply)
+    _run(_send_proactive(context, CHAT, "Quiet day so far."))
+    assert context.bot.sent == [(CHAT, "Quiet day so far.")]

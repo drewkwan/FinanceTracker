@@ -9,11 +9,18 @@ Deliberately forward-looking, unlike rundown.py's 7-day retrospective: the
 point of a MORNING briefing is "what needs my attention today", not a
 week's trend. Same "never let the model guess a number" discipline as
 rundown.py and finance._balance_text -- every figure here is computed
-deterministically in Python. Unlike /rundown, there's no AI narration step
-at all: nothing here needs synthesizing that a plain digest doesn't already
-say clearly, and skipping the Claude call means the one message that's
+deterministically in Python; _morning_briefing_text builds the real,
+final content with no AI involved at all, so the one message that's
 supposed to show up reliably every single morning can never be delayed or
-broken by an API hiccup.
+broken by an API hiccup mid-computation.
+
+It IS, however, run through Morrow's companion voice before it's actually
+sent -- see replies._reply/_send_proactive's narrate=True default and
+ai.narrate_reply's docstring. That's a pure restyle of this already-correct
+text (never a re-synthesis), with the same fall-back-to-the-original-text
+safety net as every other narrated reply, so the briefing still can't be
+lost or delayed by an API hiccup -- narration failing just means it goes
+out in its plain deterministic form instead.
 """
 
 import logging
@@ -25,6 +32,7 @@ from telegram.ext import ContextTypes
 import db
 from access import _reject_if_not_allowed
 from formatting import _event_line, _money, _reminder_line, _task_line
+from replies import _reply, _send_proactive
 
 # How many days ahead "Coming up" looks -- a focused near-term window, the
 # same reasoning as due_today_or_overdue only surfacing today/overdue tasks:
@@ -146,7 +154,7 @@ async def morning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_allowed(update):
         return
     chat_id = update.effective_chat.id
-    await update.message.reply_text(_morning_briefing_text(_morning_briefing_payload(chat_id)))
+    await _reply(update, chat_id, _morning_briefing_text(_morning_briefing_payload(chat_id)))
 
 
 async def morning_briefing_tick(context: ContextTypes.DEFAULT_TYPE):
@@ -158,6 +166,6 @@ async def morning_briefing_tick(context: ContextTypes.DEFAULT_TYPE):
     for chat_id in db.get_all_chat_ids():
         try:
             text = _morning_briefing_text(_morning_briefing_payload(chat_id))
-            await context.bot.send_message(chat_id=chat_id, text=text)
+            await _send_proactive(context, chat_id, text)
         except Exception:
             logger.exception("Failed to send morning briefing to chat %s", chat_id)

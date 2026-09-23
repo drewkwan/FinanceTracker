@@ -13,6 +13,12 @@ fix, not less. Reuses rundown._day_stats_payload's real counts for "today"
 rather than a second, separately-computed notion of "empty" -- one source
 of truth for what's logged today, same reasoning as handlers._casual_reply_text
 reusing it for today_snapshot.
+
+Sent via replies._send_proactive, not a bare context.bot.send_message, so
+this also gets Morrow's companion voice (ai.narrate_reply) and lands in the
+rolling conversation history like every other reply -- see
+morning.py's module docstring for the same reasoning applied to the
+morning briefing.
 """
 
 import logging
@@ -20,6 +26,7 @@ import logging
 from telegram.ext import ContextTypes
 
 import db
+from replies import _send_proactive
 from rundown import _day_stats_payload
 
 logger = logging.getLogger(__name__)
@@ -41,12 +48,10 @@ async def evening_nudge_tick(context: ContextTypes.DEFAULT_TYPE):
             )
             if not nothing_logged:
                 continue
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "Quiet day so far -- nothing logged yet today. All good, or just haven't had a "
-                    "chance? No pressure either way, just checking in."
-                ),
+            await _send_proactive(
+                context, chat_id,
+                "Quiet day so far -- nothing logged yet today. All good, or just haven't had a "
+                "chance? No pressure either way, just checking in."
             )
         except Exception:
             logger.exception("Failed to send evening nudge to chat %s", chat_id)

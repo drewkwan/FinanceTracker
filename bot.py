@@ -153,7 +153,7 @@ from reminders import (
     reminders_cmd,
     removereminder_cmd,
 )
-from replies import _reply, _send_alert_if_needed
+from replies import _reply, _send_alert_if_needed, _send_proactive
 from rundown import (
     RUNDOWN_WINDOW_DAYS,
     _day_stats_fallback_text,

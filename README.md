@@ -415,15 +415,21 @@ every domain module's log/correction/undo/clarification replies, and the
 `show_balance`/`show_recent`/`show_tasks`/`show_events`/`show_reminders`/
 `show_memory` intents — gets the companion treatment automatically, since
 they all already funnel through `_reply` with no code changes needed at
-each call site.
+each call site. The morning briefing and evening nudge (see their own
+sections below) have no `Update` to reply to — they're pushed by a
+schedule, not sent in response to a message — so they go through
+`replies._send_proactive` instead, `_reply`'s sibling for exactly that
+case, with the identical narrate-by-default/fallback/conversation-history
+behavior.
 
-If `narrate_reply` itself fails (API hiccup, rate limit), `_reply` falls
-back to sending the original deterministic text unchanged — same "never go
-silent, never say something false" discipline as every other narration
-call in this codebase. This does mean essentially every reply now costs
-one extra `CLAUDE_NARRATION_MODEL` call (a bit more latency, a small
-ongoing API cost) — a deliberate tradeoff for the bot actually feeling
-like a companion at all times rather than only during open-ended chat.
+If `narrate_reply` itself fails (API hiccup, rate limit), `_reply`/
+`_send_proactive` fall back to sending the original deterministic text
+unchanged — same "never go silent, never say something false" discipline
+as every other narration call in this codebase. This does mean essentially
+every reply now costs one extra `CLAUDE_NARRATION_MODEL` call (a bit more
+latency, a small ongoing API cost) — a deliberate tradeoff for the bot
+actually feeling like a companion at all times rather than only during
+open-ended chat.
 
 ## How the morning briefing works
 
@@ -444,11 +450,17 @@ separate reset job); what's coming up on your schedule over the next 7 days
 (see "How scheduled events work" below — a focused near-term window, not the
 full list `/events` shows); and, for light context, a one-line look back at
 just yesterday (calories eaten, workouts, vitals check-ins). There's no AI
-narration step here at all — every figure is computed directly the same
-"never let the model guess a number" way as `/rundown`, but skipping the
-Claude call entirely means the one message that's supposed to show up
-reliably every single morning can never be delayed or broken by an API
-hiccup.
+synthesis step deciding what the briefing says — every figure is computed
+directly the same "never let the model guess a number" way as `/rundown`,
+so the content itself can never be delayed or broken by an API hiccup.
+
+It IS, like every other reply, run through Morrow's companion voice
+(`ai.narrate_reply`, see "How Morrow's companion voice works on every
+reply" above) before it's actually sent — a pure restyle of this
+already-correct text, never a re-synthesis, with the same
+fall-back-to-the-plain-text safety net, so a narration hiccup just means
+the briefing goes out in its plain deterministic form instead of being
+lost or delayed.
 
 If `python-telegram-bot`'s job-queue extra isn't installed, the automatic
 daily push won't fire (same caveat as the hourly rollover check — see the
@@ -467,9 +479,12 @@ This is deliberately conservative: it only fires on a genuinely empty day,
 never for a partial one (a workout logged but no meals yet is completely
 normal and not worth interrupting for). The point is catching the one case
 that's actually worth a nudge — a day nothing got logged at all — not
-nagging about any specific domain. No AI call is involved (same reasoning
-as the morning briefing), and the same per-chat try/except discipline
-applies, so one chat's failure never blocks the nudge reaching anyone else.
+nagging about any specific domain. No AI call decides *whether* or *what*
+to send (same reasoning as the morning briefing) — but the message text
+does go through Morrow's companion voice before sending, same as every
+other reply (see "How Morrow's companion voice works on every reply"
+above), and the same per-chat try/except discipline applies, so one chat's
+failure never blocks the nudge reaching anyone else.
 
 ## How to-dos work
 

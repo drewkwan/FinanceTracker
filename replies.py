@@ -105,6 +105,25 @@ async def _reply(update: Update, chat_id: int, text: str, *, narrate: bool = Tru
     db.add_message(chat_id, "morrow", text)
 
 
+async def _send_proactive(context, chat_id: int, text: str, *, narrate: bool = True):
+    """Like _reply, but for a PROACTIVE send that has no Update to reply to
+    -- the morning briefing and evening nudge (see morning.morning_briefing_tick,
+    nudges.evening_nudge_tick), both pushed by app.py's job_queue on a
+    schedule rather than in response to a message. `context` here is a
+    telegram.ext.ContextTypes.DEFAULT_TYPE (its `.bot` is the same
+    _FormattingBot instance every reply already goes through for HTML
+    formatting -- see tg_html.py). Same narrate-by-default, same
+    conversation-history logging, and same fallback-on-failure discipline
+    as _reply -- these two messages are exactly the kind of flat,
+    deterministic confirmation the companion-voice work was meant to fix,
+    and they'd otherwise be the one place in the bot that still reads like
+    a receipt printer."""
+    if narrate:
+        text = await _narrate_text(chat_id, text)
+    await context.bot.send_message(chat_id=chat_id, text=text)
+    db.add_message(chat_id, "morrow", text)
+
+
 async def _send_alert_if_needed(update: Update, chat_id: int):
     if db.maybe_alert(chat_id):
         status = db.get_status(chat_id)

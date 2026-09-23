@@ -9,6 +9,7 @@ docstring for why), throwaway SQLite per test.
 import asyncio
 import datetime as dt
 
+import ai
 import bot
 import db
 from conftest import CHAT
@@ -125,6 +126,19 @@ def test_morning_cmd_replies_with_the_briefing():
     assert "renew passport" in reply
 
 
+def test_morning_cmd_reply_is_narrated(monkeypatch):
+    """Regression guard: /morning must go through replies._reply (not a
+    bare update.message.reply_text) so it gets Morrow's companion voice
+    like every other reply -- see morning.py's module docstring. Uses a
+    non-identity fake narrate_reply (unlike the autouse passthrough
+    fixture) so a regression here can actually be detected."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *a, **kw: f"(companion voice) {text}")
+    update = FakeUpdate(CHAT, text="/morning")
+    _run(bot.morning_cmd(update, FakeContext()))
+    assert update.message.replies[-1].startswith("(companion voice) Good morning")
+
+
 class _FakeBot:
     def __init__(self, fail_for_chat_id=None):
         self.sent = []
@@ -150,6 +164,28 @@ def test_morning_briefing_tick_sends_to_every_known_chat():
     sent_chat_ids = {chat_id for chat_id, _ in context.bot.sent}
     assert sent_chat_ids == {CHAT, other_chat}
     assert all("Good morning" in text for _, text in context.bot.sent)
+
+
+def test_morning_briefing_tick_sends_narrated_text(monkeypatch):
+    """Regression guard: the automatic daily push must go through
+    replies._send_proactive (not a bare context.bot.send_message) so it
+    also gets the companion voice. Uses a non-identity fake narrate_reply
+    (unlike the autouse passthrough fixture) so a regression here can
+    actually be detected."""
+    db.get_or_create_user(CHAT)
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *a, **kw: f"(companion voice) {text}")
+    context = _FakeTickContext()
+    _run(bot.morning_briefing_tick(context))
+    assert all(text.startswith("(companion voice) Good morning") for _, text in context.bot.sent)
+
+
+def test_morning_briefing_tick_logs_to_conversation_history():
+    db.get_or_create_user(CHAT)
+    context = _FakeTickContext()
+    _run(bot.morning_briefing_tick(context))
+    rows = db.get_recent_messages(CHAT)
+    assert rows[-1]["role"] == "morrow"
+    assert "Good morning" in rows[-1]["content"]
 
 
 def test_morning_briefing_tick_one_chats_failure_does_not_block_the_rest():
