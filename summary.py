@@ -19,6 +19,7 @@ import db
 import trends
 from access import _reject_if_not_allowed
 from formatting import _money
+from replies import _reply
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,44 @@ WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 # previous_period) plus enough history either side of it to smooth out one
 # unusually quiet or busy period.
 BASELINE_LOOKBACK_PERIODS = 6
+
+
+def _category_insights_for_period(chat_id: int, current_totals: list[dict], current_start: date,
+                                    length: int) -> list[dict]:
+    """A category total alone can't tell a one-off big-ticket purchase from a
+    genuine behavioral spike -- both need a real historical baseline,
+    computed here rather than left for the model to guess at, same "real
+    numbers in" discipline as everything else in this file. `current_totals`
+    is passed in (not re-queried) since /summary's own caller already has it
+    for the empty-period early-return and the fallback text.
+
+    This is deliberately its own function, not inlined into summary() --
+    insights._detect_spending_insights reuses this exact same baseline math
+    for its own "is this category running hot right now" check, and it
+    would be a real risk to have two separate implementations of the same
+    "what's typical for you" computation quietly drift apart over time."""
+    baseline_start = current_start - timedelta(days=BASELINE_LOOKBACK_PERIODS * length)
+    baseline_totals = db.get_category_totals(chat_id, baseline_start.isoformat(), current_start.isoformat())
+    typical_per_period = {r["category"]: r["total"] / BASELINE_LOOKBACK_PERIODS for r in baseline_totals}
+    return [
+        {
+            "category": r["category"],
+            "total": r["total"],
+            "n": r["n"],
+            # Average total for this category over the BASELINE_LOOKBACK_PERIODS
+            # periods immediately before this one -- "what you normally spend
+            # here in a period this length." None (not 0) when there's no
+            # history at all for this category, so the model doesn't read "0"
+            # as "you never spend on this" versus "no data yet."
+            "typical_per_period": round(typical_per_period.get(r["category"], 0.0), 2)
+            if r["category"] in typical_per_period else None,
+            "vs_typical_ratio": (
+                round(r["total"] / typical_per_period[r["category"]], 1)
+                if typical_per_period.get(r["category"]) else None
+            ),
+        }
+        for r in current_totals
+    ]
 
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,34 +106,9 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = db.get_or_create_user(chat_id)
 
-    # A category total alone can't tell a one-off big-ticket purchase from a
-    # genuine behavioral spike -- both need a real historical baseline and
-    # the actual standout transactions, computed here rather than left for
-    # the model to guess at, same "real numbers in" discipline as everything
-    # else in this file.
-    baseline_start = current_start - timedelta(days=BASELINE_LOOKBACK_PERIODS * length)
-    baseline_totals = db.get_category_totals(chat_id, baseline_start.isoformat(), current_start.isoformat())
-    typical_per_period = {r["category"]: r["total"] / BASELINE_LOOKBACK_PERIODS for r in baseline_totals}
-
-    category_insights = [
-        {
-            "category": r["category"],
-            "total": r["total"],
-            "n": r["n"],
-            # Average total for this category over the BASELINE_LOOKBACK_PERIODS
-            # periods immediately before this one -- "what you normally spend
-            # here in a period this length." None (not 0) when there's no
-            # history at all for this category, so the model doesn't read "0"
-            # as "you never spend on this" versus "no data yet."
-            "typical_per_period": round(typical_per_period.get(r["category"], 0.0), 2)
-            if r["category"] in typical_per_period else None,
-            "vs_typical_ratio": (
-                round(r["total"] / typical_per_period[r["category"]], 1)
-                if typical_per_period.get(r["category"]) else None
-            ),
-        }
-        for r in current_totals
-    ]
+    # See _category_insights_for_period's docstring for why this is its own
+    # function rather than computed inline here.
+    category_insights = _category_insights_for_period(chat_id, current_totals, current_start, length)
 
     top_transactions = [
         {
@@ -163,4 +177,11 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trend_line = f"\n{direction} {abs(pct):.0f}% vs the prior {period}."
         text = (f"Spending -- last {period}:\n" + "\n".join(lines) +
                 f"\n\nTotal: {_money(current_total)}{trend_line}")
-    await update.message.reply_text(text)
+    # narrate=False -- ai.answer_with_trends (and the raw fallback above) are
+    # already the final, complete reply, the same "don't narrate a
+    # narration" discipline as rundown/day_stats/casual (see replies._reply's
+    # docstring). This used to call update.message.reply_text directly,
+    # which meant /summary was the one place in the whole bot that skipped
+    # Morrow's companion voice entirely -- a real inconsistency, not a
+    # deliberate exemption like rundown/day_stats/casual's narrate=False is.
+    await _reply(update, chat_id, text, narrate=False)

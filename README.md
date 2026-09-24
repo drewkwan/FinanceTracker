@@ -469,6 +469,34 @@ If `python-telegram-bot`'s job-queue extra isn't installed, the automatic
 daily push won't fire (same caveat as the hourly rollover check — see the
 startup log warning), but `/morning` still works on demand regardless.
 
+## How proactive insight detection works
+
+The morning briefing also carries a "Noticed:" section, when there's
+something worth flagging — a spending category running well above its
+usual rate this week, a real multi-day weight or sleep trend, a lift you
+haven't logged in far longer than usual, or a genuine new personal-best
+top set. This is `insights.py`: a small set of pure detector functions,
+one per domain, each doing a real DB-backed computation (never an AI
+guess) and returning a plain description of what it found, the same "real
+numbers in, never guessed" discipline as everything else in this bot.
+Spending reuses `/summary`'s own historical-baseline math directly (see
+`summary._category_insights_for_period`) rather than a second, separate
+implementation of "what's typical for you." A lift only counts as newly
+stale or a new PR against its own historical cadence/best — never a fixed
+number picked for everyone — and a load that isn't a plain number (a
+machine setting, a bodyweight note) is skipped entirely rather than
+compared incorrectly.
+
+Nothing about a detected pattern "resets" on its own from one day to the
+next, so without safeguards the same observation would repeat in every
+single morning briefing. Two things prevent that: each insight is capped
+at 2 per briefing, and once an insight is actually sent it's recorded (by
+a stable per-insight key) and won't repeat for 7 days even if the
+underlying condition is still true — previewing today's briefing with
+`/morning` never counts as "sent," only the real automatic push does, so
+just checking it can't accidentally suppress something from ever actually
+going out.
+
 ## How the evening nudge works
 
 Every day at a fixed local time (`EVENING_NUDGE_HOUR`/`EVENING_NUDGE_MINUTE`

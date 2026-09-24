@@ -451,3 +451,29 @@ def test_month_to_date_total_ignores_claimable_expenses():
 def test_month_to_date_total_zero_with_no_expenses():
     db.get_or_create_user(CHAT)
     assert db.get_month_to_date_total(CHAT)["total"] == 0.0
+
+
+# ---------- proactive insight dedup ----------
+
+def test_was_insight_sent_recently_is_false_before_anything_is_recorded():
+    db.get_or_create_user(CHAT)
+    assert db.was_insight_sent_recently(CHAT, "expense:category_spike:Dining") is False
+
+
+def test_record_and_check_insight_sent_roundtrip():
+    db.get_or_create_user(CHAT)
+    db.record_insight_sent(CHAT, "expense:category_spike:Dining")
+    assert db.was_insight_sent_recently(CHAT, "expense:category_spike:Dining") is True
+    # A different dedup_key must not be suppressed by an unrelated one.
+    assert db.was_insight_sent_recently(CHAT, "vitals:weight_trend") is False
+
+
+def test_was_insight_sent_recently_respects_the_within_days_window():
+    """Regression guard for the exact reason this table exists: an insight
+    recorded outside the throttle window must be treated as fresh again,
+    not suppressed forever."""
+    db.get_or_create_user(CHAT)
+    old_date = (date.today() - timedelta(days=10)).isoformat()
+    db.record_insight_sent(CHAT, "lift:stale:squat", sent_date=old_date)
+    assert db.was_insight_sent_recently(CHAT, "lift:stale:squat", within_days=7) is False
+    assert db.was_insight_sent_recently(CHAT, "lift:stale:squat", within_days=14) is True

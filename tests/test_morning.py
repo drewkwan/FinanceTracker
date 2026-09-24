@@ -12,6 +12,7 @@ import datetime as dt
 import ai
 import bot
 import db
+import insights
 from conftest import CHAT
 from test_meals_workouts import FakeContext, FakeUpdate
 
@@ -76,6 +77,40 @@ def test_payload_yesterday_recap_is_null_when_nothing_was_logged():
     assert y["calories"] is None
     assert y["workout_activities"] == []
     assert y["vitals_checkins"] == 0
+
+
+# ---------- morning.py: insights fold-in ----------
+# These test the wiring (payload includes whatever insights.surfaceable_insights
+# returns, text renders it, dedup is recorded only on the real send) -- not
+# the detection logic itself, which has its own dedicated tests in
+# tests/test_insight_engine.py. Faking surfaceable_insights here keeps these
+# focused on morning.py's own responsibilities.
+
+def test_payload_includes_surfaceable_insights(monkeypatch):
+    db.get_or_create_user(CHAT)
+    fake_insight = {"domain": "vitals", "kind": "weight_trend", "headline": "Weight is down 1.2kg this week",
+                     "data": {}, "dedup_key": "vitals:weight_trend"}
+    monkeypatch.setattr(bot.insights, "surfaceable_insights", lambda chat_id, today_str=None: [fake_insight])
+    payload = bot._morning_briefing_payload(CHAT)
+    assert payload["insights"] == [fake_insight]
+
+
+def test_text_includes_a_noticed_section_when_insights_are_present(monkeypatch):
+    db.get_or_create_user(CHAT)
+    fake_insight = {"domain": "lift", "kind": "stale", "headline": "Haven't logged squat in 12 days",
+                     "data": {}, "dedup_key": "lift:stale:squat"}
+    monkeypatch.setattr(bot.insights, "surfaceable_insights", lambda chat_id, today_str=None: [fake_insight])
+    payload = bot._morning_briefing_payload(CHAT)
+    text = bot._morning_briefing_text(payload)
+    assert "Noticed:" in text
+    assert "Haven't logged squat in 12 days" in text
+
+
+def test_text_omits_noticed_section_when_no_insights():
+    db.get_or_create_user(CHAT)
+    payload = bot._morning_briefing_payload(CHAT)
+    text = bot._morning_briefing_text(payload)
+    assert "Noticed:" not in text
 
 
 # ---------- morning.py: text rendering ----------
@@ -186,6 +221,35 @@ def test_morning_briefing_tick_logs_to_conversation_history():
     rows = db.get_recent_messages(CHAT)
     assert rows[-1]["role"] == "morrow"
     assert "Good morning" in rows[-1]["content"]
+
+
+def test_morning_briefing_tick_records_included_insights_as_sent(monkeypatch):
+    """After a successful automatic push, every insight actually included
+    must be recorded via db.record_insight_sent -- otherwise the same
+    unchanged observation would repeat in tomorrow's briefing too (see
+    db.py's "proactive insight dedup" section)."""
+    db.get_or_create_user(CHAT)
+    fake_insight = {"domain": "vitals", "kind": "weight_trend", "headline": "Weight is down 1.2kg this week",
+                     "data": {}, "dedup_key": "vitals:weight_trend"}
+    monkeypatch.setattr(insights, "surfaceable_insights", lambda chat_id, today_str=None: [fake_insight])
+    context = _FakeTickContext()
+    _run(bot.morning_briefing_tick(context))
+    assert db.was_insight_sent_recently(CHAT, "vitals:weight_trend") is True
+
+
+def test_morning_cmd_preview_does_not_record_insights_as_sent(monkeypatch):
+    """Regression guard: previewing today's briefing with /morning must
+    NEVER burn an insight's dedup window -- only the real automatic push
+    (morning_briefing_tick) should. Otherwise just checking /morning once
+    would silently suppress an insight from ever actually going out
+    proactively."""
+    db.get_or_create_user(CHAT)
+    fake_insight = {"domain": "vitals", "kind": "weight_trend", "headline": "Weight is down 1.2kg this week",
+                     "data": {}, "dedup_key": "vitals:weight_trend"}
+    monkeypatch.setattr(insights, "surfaceable_insights", lambda chat_id, today_str=None: [fake_insight])
+    update = FakeUpdate(CHAT, text="/morning")
+    _run(bot.morning_cmd(update, FakeContext()))
+    assert db.was_insight_sent_recently(CHAT, "vitals:weight_trend") is False
 
 
 def test_morning_briefing_tick_one_chats_failure_does_not_block_the_rest():

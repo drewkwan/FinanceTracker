@@ -16,6 +16,7 @@ from it.
 import asyncio
 from datetime import date, timedelta
 
+import ai
 import bot
 import db
 from conftest import CHAT
@@ -173,6 +174,48 @@ def test_summary_still_falls_back_to_raw_breakdown_when_ai_call_fails(monkeypatc
     reply = update.message.replies[0]
     assert "Food" in reply
     assert "42" in reply
+
+
+def test_summary_reply_goes_through_reply_not_a_bare_send(monkeypatch):
+    """Regression guard for a real inconsistency: /summary used to call
+    update.message.reply_text directly, bypassing replies._reply entirely
+    -- the one place in the bot that skipped Morrow's companion voice AND
+    never got logged to conversation history. Persistence to
+    db.get_recent_messages only happens via _reply/_send_proactive, so
+    that's the real signal this test checks -- asserting on the reply TEXT
+    alone wouldn't catch a regression back to a bare reply_text call, since
+    the final text looks identical either way once narrate=False is
+    correctly applied."""
+    db.get_or_create_user(CHAT)
+    _insert(CHAT, date.today(), 42, category="Food")
+
+    monkeypatch.setattr(bot.ai, "answer_with_trends", lambda period, payload: "You spent normally this week.")
+
+    update = FakeUpdate(CHAT)
+    _run(bot.summary(update, FakeContext(args=["week"])))
+
+    assert update.message.replies[-1] == "You spent normally this week."
+    logged = db.get_recent_messages(CHAT)
+    assert logged[-1]["role"] == "morrow"
+    assert logged[-1]["content"] == "You spent normally this week."
+
+
+def test_summary_reply_is_not_narrated_a_second_time(monkeypatch):
+    """/summary must pass narrate=False (same as rundown/day_stats/casual)
+    since ai.answer_with_trends' output is already a full narration --
+    routing it back through ai.narrate_reply would be a redundant second
+    pass. Uses a non-identity fake narrate_reply (unlike the autouse
+    passthrough fixture) so a regression here is actually detectable."""
+    db.get_or_create_user(CHAT)
+    _insert(CHAT, date.today(), 42, category="Food")
+
+    monkeypatch.setattr(bot.ai, "answer_with_trends", lambda period, payload: "You spent normally this week.")
+    monkeypatch.setattr(ai, "narrate_reply", lambda text, *a, **kw: f"RE-NARRATED: {text}")
+
+    update = FakeUpdate(CHAT)
+    _run(bot.summary(update, FakeContext(args=["week"])))
+
+    assert update.message.replies[-1] == "You spent normally this week."
 
 
 def test_summary_today_uses_bot_timezone_date_not_server_clock(monkeypatch):

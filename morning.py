@@ -1,9 +1,17 @@
 """
 Morning briefing: a proactive daily digest -- today's budget, today's/
 overdue to-dos, today's still-pending daily reminders, what's coming up on
-the schedule this week, and a brief look back at yesterday -- pushed
+the schedule this week, a brief look back at yesterday, and any notable
+cross-domain patterns insights.py detected (a spending category running
+hot, a vitals trend, a lift that's overdue or hit a new top set) -- pushed
 automatically once a day (see app.py's job_queue.run_daily wiring), plus
 /morning to preview the same content any time.
+
+Insights ride along in this same briefing rather than sending their own
+separate proactive messages -- see insights.py's module docstring for the
+detection side, and morning_briefing_tick's docstring for why the dedup
+bookkeeping only happens on the real automatic send, never on the /morning
+preview.
 
 Deliberately forward-looking, unlike rundown.py's 7-day retrospective: the
 point of a MORNING briefing is "what needs my attention today", not a
@@ -30,6 +38,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 import db
+import insights
 from access import _reject_if_not_allowed
 from formatting import _event_line, _money, _reminder_line, _task_line
 from replies import _reply, _send_proactive
@@ -90,6 +99,13 @@ def _morning_briefing_payload(chat_id: int) -> dict:
             "workout_activities": [w["activity"] for w in y_workouts if w["activity"]],
             "vitals_checkins": len(y_vitals),
         },
+        # Real, already-throttled/deduped observations across every domain
+        # (spending, vitals, lifts) -- see insights.py's module docstring.
+        # Deliberately computed here (in the payload, alongside everything
+        # else) rather than fetched separately in morning_briefing_tick, so
+        # /morning's on-demand preview shows exactly the same content the
+        # automatic push would -- same discipline as every other field here.
+        "insights": insights.surfaceable_insights(chat_id, today_str),
     }
 
 
@@ -143,6 +159,13 @@ def _morning_briefing_text(payload: dict) -> str:
         lines.append("")
         lines.append("Yesterday: " + "; ".join(bits))
 
+    notable = payload.get("insights") or []
+    if notable:
+        lines.append("")
+        lines.append("Noticed:")
+        for insight in notable:
+            lines.append(f"- {insight['headline']}")
+
     return "\n".join(lines)
 
 
@@ -162,10 +185,19 @@ async def morning_briefing_tick(context: ContextTypes.DEFAULT_TYPE):
     job_queue.run_daily wiring) and pushes the briefing to every known chat
     -- same all-chats loop and same per-chat try/except as
     app.rollover_tick, so one chat's failure (e.g. they blocked the bot)
-    never blocks the briefing going out to everyone else."""
+    never blocks the briefing going out to everyone else.
+
+    Any insights included get recorded via db.record_insight_sent right
+    here, AFTER a successful send -- deliberately not inside
+    _morning_briefing_payload/morning_cmd, so previewing today's briefing
+    with /morning can never itself burn an insight's dedup window without
+    it ever having actually gone out proactively."""
     for chat_id in db.get_all_chat_ids():
         try:
-            text = _morning_briefing_text(_morning_briefing_payload(chat_id))
+            payload = _morning_briefing_payload(chat_id)
+            text = _morning_briefing_text(payload)
             await _send_proactive(context, chat_id, text)
+            for insight in payload.get("insights") or []:
+                db.record_insight_sent(chat_id, insight["dedup_key"])
         except Exception:
             logger.exception("Failed to send morning briefing to chat %s", chat_id)

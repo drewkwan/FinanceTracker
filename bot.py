@@ -54,6 +54,7 @@ import db
 import fx
 import trends
 import ai
+import insights
 
 from access import _allowed, _reject_if_not_allowed
 from app import help_cmd, main, rollover_tick, start
@@ -166,7 +167,7 @@ from rundown import (
     daystats_cmd,
     rundown_cmd,
 )
-from summary import WEEKDAY_NAMES, summary
+from summary import WEEKDAY_NAMES, _category_insights_for_period, summary
 from tasks import (
     _due_at_from_fields,
     _log_task_and_reply,

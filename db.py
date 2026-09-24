@@ -219,6 +219,14 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sent_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                dedup_key TEXT NOT NULL,
+                sent_date TEXT NOT NULL
+            )
+        """)
         # Forward-compatible migration in case this is an existing db from
         # before currency/streak/alert support was added.
         _add_column_if_missing(conn, "users", "last_alert_date", "last_alert_date TEXT")
@@ -1583,3 +1591,38 @@ def restore_deleted_event(chat_id: int, row: dict) -> dict | None:
         )
         new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     return get_event(chat_id, new_id)
+
+
+# ---------- proactive insight dedup ----------
+# A record that a given insight (identified by its own domain-specific
+# dedup_key, e.g. "expense:category_spike:Dining") was already surfaced to
+# this chat on a given day. insights.py's underlying detectors are pure
+# recomputation over the same real rows every time they run -- nothing
+# about the detected condition itself "resets" day to day -- so without
+# this table, an unchanged observation (a spending spike that's still
+# ongoing, a lift that's still stale) would repeat in every single morning
+# briefing rather than being mentioned once and then left alone for a
+# while. This is real persisted state, unlike context.chat_data (which only
+# survives until the next message -- fine for a correction's one-shot undo
+# snapshot, not for "don't repeat this for a week").
+
+def record_insight_sent(chat_id: int, dedup_key: str, sent_date: str | None = None) -> None:
+    get_or_create_user(chat_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO sent_insights (chat_id, dedup_key, sent_date) VALUES (?, ?, ?)",
+            (chat_id, dedup_key, sent_date or today_str()),
+        )
+
+
+def was_insight_sent_recently(chat_id: int, dedup_key: str, within_days: int = 7) -> bool:
+    """True if this exact dedup_key was already sent to this chat within the
+    last `within_days` days (inclusive of today) -- see record_insight_sent's
+    docstring for why this table exists at all."""
+    cutoff = (date.fromisoformat(today_str()) - timedelta(days=within_days - 1)).isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sent_insights WHERE chat_id = ? AND dedup_key = ? AND sent_date >= ? LIMIT 1",
+            (chat_id, dedup_key, cutoff),
+        ).fetchone()
+        return row is not None
